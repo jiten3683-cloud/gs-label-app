@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Gold & Silver Label App — UI Mockups</title>
+<style>
+  :root {
+    --gold:#B8860B; --gold-light:#E8C879; --bg:#f4ecd8; --ink:#222;
+    --card:#fff; --line:#d8c8a4; --green:#1e7d32; --red:#c62828;
+  }
+  * { box-sizing:border-box; font-family:'Segoe UI', system-ui, sans-serif; }
+  body { margin:0; padding:24px; background:#fafaf3; color:var(--ink); }
+  h1 { color:var(--gold); margin-top:0; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, 320px); gap:24px; }
+  .phone {
+    width:320px; height:640px; border:8px solid #222; border-radius:32px;
+    background:#fffdf8; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.15);
+    display:flex; flex-direction:column;
+  }
+  .topbar { background:var(--gold-light); color:#3a2806; padding:12px 14px;
+    font-weight:600; display:flex; align-items:center; justify-content:space-between; }
+  .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:6px; }
+  .dot.green { background:var(--green); } .dot.red { background:var(--red); }
+  .screen-name { text-align:center; font-weight:700; margin-bottom:8px; color:var(--gold); }
+  .nav {
+    margin-top:auto; display:grid; grid-template-columns:repeat(5,1fr);
+    background:#f3e5b8; border-top:1px solid var(--line); padding:6px 0;
+    font-size:10px; text-align:center;
+  }
+  .nav div { padding:4px 0; }
+  .nav .active { color:var(--gold); font-weight:700; }
+  .nav .ico { font-size:18px; line-height:1; }
+  .body { flex:1; overflow-y:auto; padding:14px; font-size:13px; }
+
+  /* scale screen */
+  .reading {
+    background:#fff7d6; border-radius:10px; padding:14px; margin-bottom:10px;
+    box-shadow:0 1px 0 #e0d28e inset;
+  }
+  .reading .big { font-size:42px; font-weight:800; color:var(--green); text-align:right; }
+  .reading .row { display:flex; justify-content:space-between; font-size:11px; color:#666; }
+  .btn { background:var(--gold); color:#fff; padding:10px; border-radius:8px;
+    text-align:center; font-weight:700; border:none; width:100%; margin-top:8px; }
+  .btn.secondary { background:#fff; color:var(--gold); border:1px solid var(--gold); }
+  .field { background:#fffdf3; border:1px solid var(--line); border-radius:6px;
+    padding:8px 10px; margin:6px 0; font-size:12px; }
+  .row2 { display:grid; grid-template-columns:2fr 1fr; gap:6px; }
+  .badge { background:#fff3cd; color:#5a3a00; padding:2px 6px; border-radius:10px; font-size:10px; }
+  .printbtn {
+    background:linear-gradient(180deg,#d4a017 0%, #b8860b 100%); color:#fff;
+    padding:18px; border-radius:10px; text-align:center; font-size:18px;
+    font-weight:800; letter-spacing:1px; margin-top:10px;
+    box-shadow:0 4px 0 #8a630a;
+  }
+
+  /* designer screen */
+  .canvas {
+    background:#fff; border:1px dashed #999; height:130px;
+    position:relative; margin:6px 0;
+  }
+  .elem {
+    position:absolute; border:1px solid #aaa; background:#fffbe8;
+    padding:2px 4px; font-size:10px;
+  }
+  .elem.sel { border:2px solid #1e88e5; }
+  .tools { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
+  .tools span { background:#f0e2a8; padding:4px 6px; border-radius:14px; font-size:10px; }
+  .insp { background:#f3eee0; border-radius:6px; padding:6px; font-size:10px; }
+
+  /* reports / templates */
+  table { width:100%; border-collapse:collapse; font-size:11px; }
+  th,td { text-align:left; padding:4px 6px; border-bottom:1px solid #eee; }
+  th { background:#f8efd2; color:#5a3a00; }
+  .summary { background:#fff7d6; padding:8px; border-radius:6px; margin:6px 0; font-size:11px; }
+  .summary b { color:var(--gold); }
+
+  /* device screen */
+  .status-card { background:#fff7d6; border-radius:10px; padding:14px; }
+  .tip { font-size:11px; color:#555; margin:3px 0; }
+
+  /* fake label preview */
+  .label {
+    width:240px; height:120px; background:#fff; border:1px solid #555;
+    position:relative; margin:auto; font-size:9px;
+  }
+  .label .l-text { position:absolute; }
+  .label .l-qr { position:absolute; right:8px; top:8px;
+    width:40px; height:40px; background:repeating-conic-gradient(#000 0% 25%, #fff 0% 50%) 50% / 6px 6px; border:1px solid #000; }
+  .label .l-bar { position:absolute; left:8px; bottom:8px; width:120px; height:20px;
+    background:repeating-linear-gradient(90deg,#000 0 2px,#fff 2px 4px); }
+</style>
+</head>
+<body>
+
+<h1>Gold &amp; Silver Label App — UI Mockups</h1>
+<p>Visual reference for the five Flutter screens. Final UI is rendered with Material 3 and matches these layouts.</p>
+
+<div class="grid">
+
+  <!-- ============ SCALE / PRINT ============ -->
+  <div>
+    <div class="screen-name">1 · Scale &amp; Print</div>
+    <div class="phone">
+      <div class="topbar">
+        <span>Gold &amp; Silver Label</span>
+        <span><span class="dot green"></span>Linked</span>
+      </div>
+      <div class="body">
+        <div class="reading">
+          <div class="row"><span>NET</span><span><span class="badge">STABLE</span></span></div>
+          <div class="big">12.345 g</div>
+          <div class="row"><span>Gross 12.350 g</span><span>Tare 0.005 g</span></div>
+        </div>
+        <div class="row2">
+          <button class="btn secondary">TARE</button>
+          <button class="btn secondary">ZERO</button>
+        </div>
+        <div class="field">Product / Item: <b>Ring 22K</b></div>
+        <div class="row2">
+          <div class="field">Purity: <b>22K</b></div>
+          <div class="field">Copies: <b>1</b></div>
+        </div>
+        <div class="field">Rate per gram: <b>₹ 6,420</b></div>
+        <div class="field">Template: <b>Ring – 50×25 mm</b></div>
+        <div class="printbtn">PRINT LABEL</div>
+      </div>
+      <div class="nav">
+        <div class="active"><div class="ico">⚖️</div>Scale</div>
+        <div><div class="ico">🎨</div>Designer</div>
+        <div><div class="ico">📋</div>Templates</div>
+        <div><div class="ico">📊</div>Reports</div>
+        <div><div class="ico">📶</div>Device</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ DESIGNER ============ -->
+  <div>
+    <div class="screen-name">2 · Drag-&amp;-Drop Designer</div>
+    <div class="phone">
+      <div class="topbar"><span>New Template</span><span>50×25 mm</span></div>
+      <div class="body">
+        <div class="field" style="display:flex; gap:6px;">
+          <span style="flex:1">Name: <b>Ring – 50×25</b></span>
+          <span>W <b>50</b> × H <b>25</b></span>
+        </div>
+        <div class="canvas">
+          <div class="elem" style="left:8px; top:6px;">Pure Gold 22K</div>
+          <div class="elem sel" style="left:8px; top:30px;">Net: 12.345 g</div>
+          <div class="elem" style="left:8px; top:54px;">SN: GS-00012</div>
+          <div class="elem" style="left:8px; top:78px;">12-05-2026 14:32</div>
+          <div class="elem" style="right:8px; top:6px; width:40px; height:40px;
+            background:repeating-conic-gradient(#000 0% 25%, #fff 0% 50%) 50% / 6px 6px;"></div>
+          <div class="elem" style="left:8px; bottom:6px; width:80px; height:14px;
+            background:repeating-linear-gradient(90deg,#000 0 2px,#fff 2px 4px);"></div>
+        </div>
+        <div class="tools">
+          <span>＋Text</span><span>＋Weight</span><span>＋Serial</span>
+          <span>＋Date</span><span>＋QR</span><span>＋Barcode</span>
+          <span>＋Box</span><span>＋Logo</span>
+        </div>
+        <div class="insp">
+          <b>WEIGHT</b> @ (8, 30) — Prefix <b>Net: </b> · Suffix <b>g</b> · Font <b>3</b>
+          <br>x: <b>8</b>  y: <b>30</b>  rot: 0
+        </div>
+        <button class="btn">Save Template</button>
+      </div>
+      <div class="nav">
+        <div><div class="ico">⚖️</div>Scale</div>
+        <div class="active"><div class="ico">🎨</div>Designer</div>
+        <div><div class="ico">📋</div>Templates</div>
+        <div><div class="ico">📊</div>Reports</div>
+        <div><div class="ico">📶</div>Device</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ TEMPLATES ============ -->
+  <div>
+    <div class="screen-name">3 · Templates</div>
+    <div class="phone">
+      <div class="topbar"><span>Templates</span><span>5 saved</span></div>
+      <div class="body">
+        <table>
+          <tr><th>Name</th><th>Size</th><th>Updated</th></tr>
+          <tr><td>Ring – 50×25</td><td>50×25</td><td>12-May 14:30</td></tr>
+          <tr><td>Chain – 60×30</td><td>60×30</td><td>11-May 19:22</td></tr>
+          <tr><td>Bangle – 40×20</td><td>40×20</td><td>10-May 11:05</td></tr>
+          <tr><td>Coin – 30×30</td><td>30×30</td><td>09-May 09:18</td></tr>
+          <tr><td>Bar – 80×40</td><td>80×40</td><td>07-May 16:44</td></tr>
+        </table>
+        <div style="margin-top:16px;">
+          <div class="screen-name" style="margin:0 0 6px">Preview</div>
+          <div class="label">
+            <div class="l-text" style="left:6px; top:4px; font-weight:700">PURE GOLD 22K</div>
+            <div class="l-text" style="left:6px; top:18px; font-size:11px; font-weight:700">Net: 12.345 g</div>
+            <div class="l-text" style="left:6px; top:34px">SN: GS-00012</div>
+            <div class="l-text" style="left:6px; top:46px">12-05-2026 14:32</div>
+            <div class="l-qr"></div>
+            <div class="l-bar"></div>
+          </div>
+        </div>
+      </div>
+      <div class="nav">
+        <div><div class="ico">⚖️</div>Scale</div>
+        <div><div class="ico">🎨</div>Designer</div>
+        <div class="active"><div class="ico">📋</div>Templates</div>
+        <div><div class="ico">📊</div>Reports</div>
+        <div><div class="ico">📶</div>Device</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ REPORTS ============ -->
+  <div>
+    <div class="screen-name">4 · Reports</div>
+    <div class="phone">
+      <div class="topbar"><span>Reports</span><span>📤 Export</span></div>
+      <div class="body">
+        <div class="field">From: <b>05-May</b>  &nbsp;&nbsp;  To: <b>12-May</b></div>
+        <div class="field">Product: <b>(all)</b></div>
+        <div class="summary">
+          Rows <b>27</b> · Total Net <b>318.420 g</b> · Total <b>₹ 20,46,360</b>
+        </div>
+        <table>
+          <tr><th>Serial</th><th>Net</th><th>₹</th></tr>
+          <tr><td>GS-00027</td><td>12.345</td><td>79,255</td></tr>
+          <tr><td>GS-00026</td><td>08.110</td><td>52,066</td></tr>
+          <tr><td>GS-00025</td><td>15.200</td><td>97,584</td></tr>
+          <tr><td>GS-00024</td><td>07.890</td><td>50,653</td></tr>
+          <tr><td>GS-00023</td><td>22.000</td><td>141,240</td></tr>
+          <tr><td>GS-00022</td><td>11.450</td><td>73,509</td></tr>
+        </table>
+        <div class="row2" style="margin-top:8px">
+          <button class="btn">CSV</button>
+          <button class="btn">XLSX</button>
+        </div>
+      </div>
+      <div class="nav">
+        <div><div class="ico">⚖️</div>Scale</div>
+        <div><div class="ico">🎨</div>Designer</div>
+        <div><div class="ico">📋</div>Templates</div>
+        <div class="active"><div class="ico">📊</div>Reports</div>
+        <div><div class="ico">📶</div>Device</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ DEVICE ============ -->
+  <div>
+    <div class="screen-name">5 · Device</div>
+    <div class="phone">
+      <div class="topbar"><span>Device</span><span><span class="dot green"></span>OK</span></div>
+      <div class="body">
+        <div class="status-card">
+          <b>Bridge status</b><br>
+          <span class="dot green"></span>Connected to <b>GS-LABEL-BRIDGE</b><br>
+          Last status: <b>ok: printed</b><br>
+          Last reading: 12-May 14:32:18
+        </div>
+        <button class="btn secondary" style="margin-top:14px">Disconnect</button>
+        <div style="margin-top:18px"><b>Tips</b></div>
+        <div class="tip">• Make sure the ESP32 bridge is powered on</div>
+        <div class="tip">• Grant Bluetooth + Location permission</div>
+        <div class="tip">• The device advertises as <b>GS-LABEL-BRIDGE</b></div>
+        <div class="tip">• Keep phone within ~10 m of bridge</div>
+      </div>
+      <div class="nav">
+        <div><div class="ico">⚖️</div>Scale</div>
+        <div><div class="ico">🎨</div>Designer</div>
+        <div><div class="ico">📋</div>Templates</div>
+        <div><div class="ico">📊</div>Reports</div>
+        <div class="active"><div class="ico">📶</div>Device</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h2 style="margin-top:40px; color:var(--gold)">System block diagram</h2>
+<svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg" style="background:#fff; border:1px solid var(--line); border-radius:8px; padding:8px; max-width:100%">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect x="30"  y="90"  width="140" height="80" rx="10" fill="#fff7d6" stroke="#B8860B"/>
+  <text x="100" y="125" text-anchor="middle" font-weight="700">Weighing</text>
+  <text x="100" y="145" text-anchor="middle">Scale (RS232)</text>
+
+  <rect x="230" y="60"  width="180" height="160" rx="10" fill="#E8C879" stroke="#8a630a"/>
+  <text x="320" y="100" text-anchor="middle" font-weight="700">ESP32 Bridge</text>
+  <text x="320" y="125" text-anchor="middle" font-size="11">UART1: Scale RX</text>
+  <text x="320" y="145" text-anchor="middle" font-size="11">UART2: Printer TX</text>
+  <text x="320" y="165" text-anchor="middle" font-size="11">BLE GATT</text>
+  <text x="320" y="185" text-anchor="middle" font-size="11">TSPL builder</text>
+
+  <rect x="470" y="30"  width="170" height="90" rx="10" fill="#fff" stroke="#1e88e5"/>
+  <text x="555" y="65"  text-anchor="middle" font-weight="700">Mobile App</text>
+  <text x="555" y="85"  text-anchor="middle" font-size="11">Flutter (Android/iOS)</text>
+  <text x="555" y="105" text-anchor="middle" font-size="11">Designer · Scale · Reports</text>
+
+  <rect x="470" y="160" width="170" height="90" rx="10" fill="#fff" stroke="#666"/>
+  <text x="555" y="195" text-anchor="middle" font-weight="700">Local SQLite</text>
+  <text x="555" y="215" text-anchor="middle" font-size="11">Templates · Prints</text>
+  <text x="555" y="235" text-anchor="middle" font-size="11">CSV / XLSX export</text>
+
+  <rect x="700" y="90"  width="170" height="80" rx="10" fill="#fff7d6" stroke="#B8860B"/>
+  <text x="785" y="125" text-anchor="middle" font-weight="700">TSC TTP-244 Pro</text>
+  <text x="785" y="145" text-anchor="middle">TSPL Printer</text>
+
+  <line x1="170" y1="130" x2="230" y2="130" stroke="#444" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="200" y="120" text-anchor="middle" font-size="10">ASCII</text>
+
+  <line x1="410" y1="100" x2="470" y2="80"  stroke="#444" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="470" y1="80"  x2="410" y2="100" stroke="#444" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="445" y="75"  text-anchor="middle" font-size="10">BLE</text>
+
+  <line x1="410" y1="130" x2="700" y2="130" stroke="#444" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="560" y="120" text-anchor="middle" font-size="10">TSPL over UART</text>
+
+  <line x1="555" y1="120" x2="555" y2="160" stroke="#444" stroke-width="2" marker-end="url(#ar)"/>
+</svg>
+
+</body>
+</html>

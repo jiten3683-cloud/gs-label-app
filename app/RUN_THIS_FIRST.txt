@@ -1,0 +1,50 @@
+============================================================
+  HOW TO INSTALL EVERYTHING AND BUILD THE APK
+============================================================
+
+You only need to run ONE file:
+
+   setup_and_build.ps1
+
+STEPS:
+  1. Open File Explorer to this folder (GoldSilverLabelApp\app).
+  2. Right-click on  setup_and_build.ps1
+  3. Choose  "Run with PowerShell"
+  4. When Windows asks for admin permission, click YES.
+
+WHAT IT WILL DO (automatic, ~20-40 min the first time):
+  - Install Chocolatey  (Windows package manager)
+  - Install JDK 17       (Java)
+  - Install Git
+  - Install Flutter SDK
+  - Install Android SDK command-line tools + platform 34
+  - Accept all Android SDK licences
+  - Set JAVA_HOME, ANDROID_HOME environment variables (system-wide)
+  - Scaffold the android/ folder next to lib/
+  - Inject Bluetooth permissions into AndroidManifest.xml
+  - Build the release APK
+
+OUTPUT:
+  At the end you'll have these files:
+     build\app\outputs\flutter-apk\app-release.apk
+     gs-label-app.apk           (copy in this folder, easy to share)
+
+INSTALL ON YOUR PHONE:
+  Option A:  adb install -r gs-label-app.apk
+  Option B:  Copy gs-label-app.apk to the phone (WhatsApp /
+             Gmail / USB cable) and tap it on the phone.
+             You may need to enable "Install from unknown
+             sources" for the file manager.
+
+IF SOMETHING GOES WRONG:
+  - Make sure you ran PowerShell as Administrator
+  - Try running these one-by-one in a new admin PowerShell:
+        flutter doctor
+        flutter doctor --android-licenses
+        flutter pub get
+        flutter build apk --release
+  - Common issue: JAVA_HOME points to an old JDK -> set it to
+        "C:\Program Files\Eclipse Adoptium\jdk-17.*"
+  - Antivirus may block Chocolatey - temporarily disable it.
+
+============================================================

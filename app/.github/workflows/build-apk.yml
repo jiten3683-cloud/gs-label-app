@@ -1,0 +1,60 @@
+name: Build APK
+# Cloud build option — push the GoldSilverLabelApp/app folder to a GitHub repo
+# and this workflow produces a signed-debug APK as a downloadable artifact.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: stable
+
+      - name: Scaffold android/ folder
+        run: flutter create --project-name gs_label_app --org com.gslabel --platforms android .
+
+      - name: Inject Bluetooth permissions
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("android/app/src/main/AndroidManifest.xml")
+          x = p.read_text()
+          perms = '''
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.BLUETOOTH"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
+          '''
+          if "BLUETOOTH_SCAN" not in x:
+              x = re.sub(r"(<manifest [^>]+>)", r"\1" + perms, x, count=1)
+              p.write_text(x)
+          PY
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gs-label-app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk

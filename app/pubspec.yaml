@@ -1,0 +1,37 @@
+name: gs_label_app
+description: Gold & Silver tag / label printing app for ESP32 + TSC TTP-244 Pro
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.19.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_blue_plus: ^1.32.0          # BLE
+  permission_handler: ^11.3.1         # Android 12+ runtime perms
+  provider: ^6.1.2                    # state
+  sqflite: ^2.3.3                     # local SQLite
+  path_provider: ^2.1.3
+  path: ^1.9.0
+  share_plus: ^9.0.0                  # share/export reports
+  csv: ^6.0.0                         # CSV export
+  excel: ^4.0.6                       # XLSX export
+  pdf: ^3.10.8                        # PDF export (also for label preview)
+  printing: ^5.12.0                   # PDF preview
+  qr_flutter: ^4.1.0                  # render QR on canvas preview
+  barcode_widget: ^2.0.4              # render Code128 etc.
+  image_picker: ^1.1.0                # import logo
+  image: ^4.2.0                       # convert/resize logo
+  uuid: ^4.4.0
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/
