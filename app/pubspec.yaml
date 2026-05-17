@@ -1,7 +1,7 @@
 name: gs_label_app
-description: Gold & Silver tag / label printing app for ESP32 + TSC TTP-244 Pro
+description: "JBC-GS-PRINTER — Gold & Silver label printing app for ESP32 + TSC TTP-244 Pro"
 publish_to: 'none'
-version: 0.1.0+1
+version: 1.0.0+1
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -10,28 +10,51 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_blue_plus: ^1.32.0          # BLE
-  permission_handler: ^11.3.1         # Android 12+ runtime perms
-  provider: ^6.1.2                    # state
-  sqflite: ^2.3.3                     # local SQLite
+
+  # BLE
+  flutter_blue_plus: ^1.32.0
+  permission_handler: ^11.3.1
+
+  # State / DI
+  provider: ^6.1.2
+
+  # Local DB & storage
+  sqflite: ^2.3.3
   path_provider: ^2.1.3
   path: ^1.9.0
-  share_plus: ^9.0.0                  # share/export reports
-  csv: ^6.0.0                         # CSV export
-  excel: ^4.0.6                       # XLSX export
-  pdf: ^3.10.8                        # PDF export (also for label preview)
-  printing: ^5.12.0                   # PDF preview
-  qr_flutter: ^4.1.0                  # render QR on canvas preview
-  barcode_widget: ^2.0.4              # render Code128 etc.
-  image_picker: ^1.1.0                # import logo
-  image: ^4.2.0                       # convert/resize logo
+  shared_preferences: ^2.3.2
+
+  # Network / license
+  http: ^1.2.2
+
+  # Device fingerprint
+  device_info_plus: ^10.1.0
+
+  # Export / share
+  share_plus: ^12.0.2
+  csv: ^6.0.0
+  excel: ^4.0.6
+  pdf: ^3.10.8
+  printing: ^5.14.0
+
+  # Label rendering
+  qr_flutter: ^4.1.0
+  barcode_widget: ^2.0.4
+
+  # File pick (template import)
+  file_picker: ^8.0.0
+
+  # Image processing (logo)
+  image_picker: ^1.1.0
+  image: ^4.2.0
+
+  # Utilities
   uuid: ^4.4.0
   intl: ^0.19.0
+  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_lints: ^4.0.0
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/fonts/

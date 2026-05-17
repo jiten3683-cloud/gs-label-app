@@ -60,7 +60,23 @@ if (-not (Test-Path "$sdkRoot\cmdline-tools\latest\bin\sdkmanager.bat")) {
     $zip  = "$env:TEMP\cmdline-tools.zip"
     $url  = "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip"
     Write-Host "Downloading Android cmdline-tools (~120 MB)..."
-    Invoke-WebRequest -Uri $url -OutFile $zip
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    $downloaded = $false
+    for ($i = 1; $i -le 3; $i++) {
+        try {
+            if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                curl.exe -L --retry 3 --retry-delay 5 -o $zip $url
+                if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
+            } else {
+                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+                $downloaded = $true; break
+            }
+        } catch {
+            Write-Host "Attempt $i failed: $_. Retrying..."
+            Start-Sleep -Seconds 5
+        }
+    }
+    if (-not $downloaded) { Fail "Failed to download Android cmdline-tools after 3 attempts." }
     New-Item -ItemType Directory -Force -Path "$sdkRoot\cmdline-tools" | Out-Null
     Expand-Archive -Path $zip -DestinationPath "$sdkRoot\cmdline-tools" -Force
     Rename-Item -Path "$sdkRoot\cmdline-tools\cmdline-tools" -NewName "latest"
@@ -111,7 +127,17 @@ if ($x -notmatch "BLUETOOTH_SCAN") {
     OK "Permissions already present"
 }
 
-# raise minSdkVersion to 21 (flutter_blue_plus requires it)
+# Patch build.gradle.kts: pin compileSdk=34, minSdk=21, targetSdk=34
+$gradleKts = ".\android\app\build.gradle.kts"
+if (Test-Path $gradleKts) {
+    (Get-Content $gradleKts) `
+        -replace "compileSdk\s*=\s*flutter\.compileSdkVersion", "compileSdk = 34" `
+        -replace "minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 21" `
+        -replace "targetSdk\s*=\s*flutter\.targetSdkVersion", "targetSdk = 34" |
+        Set-Content $gradleKts
+    OK "compileSdk=34, minSdk=21, targetSdk=34 set in build.gradle.kts"
+}
+# Legacy .gradle fallback
 $gradle = ".\android\app\build.gradle"
 if (Test-Path $gradle) {
     (Get-Content $gradle) `
