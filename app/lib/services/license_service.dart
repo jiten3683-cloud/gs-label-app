@@ -30,7 +30,7 @@ enum LicenseState { trial, trialExpired, activated }
 
 class LicenseService {
   static const _apiUrl    = 'http://jbcweighingscale.com/admin_ws/api.php';
-  static const _secCh     = MethodChannel('com.gslabel.gs_label_app/security');
+  static const _secCh     = MethodChannel('com.jbc.gsprinter/security');
 
   static const _storage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
