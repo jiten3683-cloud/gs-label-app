@@ -1,7 +1,7 @@
 name: gs_label_app
 description: "JBC-GS-PRINTER — Gold & Silver label printing app for ESP32 + TSC TTP-244 Pro"
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
