@@ -19,6 +19,15 @@ android {
         jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("jbc-gs-printer.keystore")
+            storePassword = "JbCorp@2026!"
+            keyAlias = "jbc-gs-printer"
+            keyPassword = "JbCorp@2026!"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.jbc.gsprinter"
         minSdk = flutter.minSdkVersion   // Android 6.0+ required for EncryptedSharedPreferences / Keystore
@@ -29,7 +38,7 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
