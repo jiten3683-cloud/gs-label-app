@@ -55,7 +55,9 @@ BLEServer*         pServer      = nullptr;
 BLECharacteristic* pCharWeight  = nullptr;
 BLECharacteristic* pCharCommand = nullptr;
 BLECharacteristic* pCharStatus  = nullptr;
-bool deviceConnected = false;
+bool     deviceConnected    = false;
+bool     doStartAdv         = false;   // deferred re-advertise after disconnect
+uint32_t disconnectMs       = 0;
 
 // BLE chunk reassembly buffer
 String bleBuffer = "";
@@ -97,9 +99,27 @@ void _sendOrientationTest(uint8_t dir);
 // ============================================================================
 inline void tspl(const char* s) { Serial.print(s); }
 
+// Track last printed label size to detect size changes and re-calibrate gap sensor.
+static uint16_t lastLabelW = 0, lastLabelH = 0;
+
 void tsplBegin(uint16_t w, uint16_t h, uint8_t gap = 3,
                uint8_t density = 8, uint8_t speed = 2, uint8_t dir = 0) {
-  Serial.print("DOWNLOAD \"A.BAS\"\r\n");
+  // When label size changes, send SIZE+GAP as DIRECT commands first, then GAPDETECT.
+  // GAPDETECT feeds one label so the printer re-learns the gap boundary — this prevents
+  // content from landing in the inter-label gap after a media change.
+  if (w != lastLabelW || h != lastLabelH) {
+    Serial.printf("SIZE %d mm,%d mm\r\n", w, h);
+    Serial.printf("GAP %d mm,0\r\n", gap);
+    Serial.flush();
+    delay(200);
+    Serial.print("GAPDETECT\r\n");
+    Serial.flush();
+    // Small labels need more time: 20×10mm at speed-2 (50mm/s) may advance 150–200mm
+    // of media to detect 5–6 gaps; allow 6 s to be safe.
+    delay(h <= 15 ? 6000 : 4000);
+    lastLabelW = w;
+    lastLabelH = h;
+  }
   Serial.printf("SIZE %d mm,%d mm\r\n", w, h);
   Serial.printf("GAP %d mm,0\r\n", gap);
   Serial.printf("DENSITY %d\r\n", density);
@@ -138,8 +158,6 @@ void tsplLogo(int x, int y, const String& name) {
 
 void tsplPrint(uint16_t copies = 1) {
   Serial.printf("PRINT 1,%d\r\n", copies);
-  Serial.print("EOP\r\n");
-  Serial.print("A\r\n");
 }
 
 // ============================================================================
@@ -156,6 +174,9 @@ void notifyStatus(const String& code, const String& msg) {
   pCharStatus->notify();
 }
 
+// Font character heights in dots at 203 DPI — mirrors app kFontDotH
+static const uint8_t kFontH[9] = {0, 12, 20, 24, 32, 48, 19, 27, 21};
+
 // ============================================================================
 //  Print job executor
 // ============================================================================
@@ -165,39 +186,91 @@ void executePrintJob(JsonDocument& doc) {
   uint16_t h        = label["h"]        | 25;
   uint8_t  gap      = label["gap"]      | 3;
   uint8_t  darkness = label["darkness"] | 8;
-  uint8_t  dir      = label["dir"]      | 0;   // 0=normal, 1=rotated 180° for flipped printers
+  uint8_t  dir      = label["dir"]      | 0;
   uint16_t copies   = doc["copies"]     | 1;
 
-  tsplBegin(w, h, gap, darkness, 2, dir);
+  const int wDots = (int)w * 8;
+  const int hDots = (int)h * 8;
+
+  // Always emit DIRECTION 0.  When dir=1 (reverse), every element's anchor is
+  // mirrored to (wDots-x, hDots-y) and its rotation is flipped +180°.
+  // This keeps the visual layout identical while the label feeds in reverse,
+  // and avoids the coordinate-origin shift that DIRECTION 1 would introduce.
+  tsplBegin(w, h, gap, darkness, 2, 0);
 
   for (JsonObject e : doc["elements"].as<JsonArray>()) {
     String type = e["type"] | "";
     int x = e["x"] | 0;
     int y = e["y"] | 0;
 
+    // Skip elements whose anchor is outside the label area
+    if (x < 0 || y < 0 || x >= wDots || y >= hDots) continue;
+
     if (type == "text") {
-      String txt = e["text"] | "";
+      String txt  = e["text"] | "";
       txt.replace("\"", "'");
-      tsplText(x, y, e["font"] | "3", e["rot"] | 0, e["xs"] | 1, e["ys"] | 1, txt);
+      String font = e["font"] | "3";
+      int rot  = e["rot"] | 0;
+      int ys   = e["ys"]  | 1;
+      int fIdx = font.toInt(); if (fIdx < 1 || fIdx > 8) fIdx = 3;
+      int textH = (int)kFontH[fIdx] * ys;
+      if (dir == 1) {
+        x = wDots - x; y = hDots - y; rot = (rot + 180) % 360;
+      } else {
+        // Clamp y so text height stays inside label (canvas clips visually; printer does not)
+        if (y + textH > hDots) y = hDots - textH;
+        if (y < 0) continue;
+      }
+      tsplText(x, y, font, rot, e["xs"] | 1, ys, txt);
 
     } else if (type == "qr") {
-      String d = e["data"] | ""; d.replace("\"", "'");
-      tsplQR(x, y, e["ecc"] | "M", e["size"] | 4, e["mode"] | "A", e["rot"] | 0, d);
+      String d  = e["data"] | ""; d.replace("\"", "'");
+      int rot   = e["rot"]  | 0;
+      int cells = e["size"] | 4;
+      int qrDots = cells * 25;   // ≈ 25 modules per side for a typical small QR
+      if (dir == 1) {
+        x = wDots - x; y = hDots - y; rot = (rot + 180) % 360;
+      } else {
+        if (x + qrDots > wDots) x = max(0, wDots - qrDots);
+        if (y + qrDots > hDots) y = max(0, hDots - qrDots);
+      }
+      tsplQR(x, y, e["ecc"] | "M", cells, e["mode"] | "A", rot, d);
 
     } else if (type == "bar") {
-      String d = e["data"] | ""; d.replace("\"", "'");
-      tsplBarcode(x, y, e["btype"] | "128", e["height"] | 60,
-                  e["hr"] | 1, e["rot"] | 0, e["narrow"] | 2, e["wide"] | 2, d);
+      String d  = e["data"] | ""; d.replace("\"", "'");
+      int rot   = e["rot"]    | 0;
+      int barH  = e["height"] | 60;
+      if (dir == 1) {
+        x = wDots - x; y = hDots - y; rot = (rot + 180) % 360;
+      } else {
+        if (y + barH > hDots) barH = hDots - y;
+        if (barH < 8) continue;
+      }
+      tsplBarcode(x, y, e["btype"] | "128", barH,
+                  e["hr"] | 1, rot, e["narrow"] | 2, e["wide"] | 2, d);
 
     } else if (type == "box") {
-      tsplBox(x, y, e["xe"] | (x + 50), e["ye"] | (y + 50), e["t"] | 2);
+      int xe = e["xe"] | (x + 50);
+      int ye = e["ye"] | (y + 50);
+      int t  = e["t"]  | 2;
+      if (dir == 1) {
+        int nx = wDots - xe, ny = hDots - ye;
+        xe = wDots - x;  ye = hDots - y;
+        x  = nx;         y  = ny;
+      }
+      x  = max(0, x);       y  = max(0, y);
+      xe = min(xe, wDots);  ye = min(ye, hDots);
+      tsplBox(x, y, xe, ye, t);
 
     } else if (type == "logo") {
-      const char* bmpHex = e["bmp"] | "";
       int bw = e["bw"] | 0;
-      int bh = e["lh"] | 0;   // height in dots
+      int bh = e["lh"] | 0;
+      if (dir == 1) {
+        x = max(0, wDots - x - bw * 8);
+        y = max(0, hDots - y - bh);
+      }
+      const char* bmpHex = e["bmp"] | "";
       if (strlen(bmpHex) > 0 && bw > 0 && bh > 0) {
-        // Inline TSPL BITMAP: decode hex pairs to raw bytes
         Serial.printf("BITMAP %d,%d,%d,%d,0,", x, y, bw, bh);
         for (int i = 0; bmpHex[i] != '\0' && bmpHex[i+1] != '\0'; i += 2) {
           char nibbles[3] = { bmpHex[i], bmpHex[i+1], '\0' };
@@ -219,7 +292,6 @@ void executePrintJob(JsonDocument& doc) {
 //  user can verify which direction is "normal" for their printer.
 // ============================================================================
 void _sendOrientationTest(uint8_t dir) {
-  Serial.print("DOWNLOAD \"A.BAS\"\r\n");
   Serial.print("SIZE 50 mm,25 mm\r\n");
   Serial.print("GAP 3 mm,0\r\n");
   Serial.printf("DIRECTION %d\r\n", dir);
@@ -235,8 +307,6 @@ void _sendOrientationTest(uint8_t dir) {
   // Barcode in lower half to distinguish orientation visually
   Serial.print("BARCODE 8,110,\"128\",40,1,0,2,2,\"ORIENT-TEST\"\r\n");
   Serial.print("PRINT 1,1\r\n");
-  Serial.print("EOP\r\n");
-  Serial.print("A\r\n");
 }
 
 // ============================================================================
@@ -296,8 +366,6 @@ void handleCommand(const String& payload) {
 //  Fires on boot AND when button pressed with no prior app job.
 // ============================================================================
 void sendTestPrint() {
-  // DOWNLOAD mode matches original JBCTAG SLIP_PRINT()
-  Serial.print("DOWNLOAD \"A.BAS\"\r\n");
   Serial.print("DENSITY 9\r\n");
   Serial.print("SIZE 81 mm,13 mm\r\n");
   Serial.print("GAP 2.5 mm,0 mm\r\n");
@@ -307,8 +375,8 @@ void sendTestPrint() {
   Serial.print("TEXT 40,5,\"2\",0,1,1,\"GS-LABEL TEST\"\r\n");
   Serial.print("TEXT 40,42,\"2\",0,1,1,\"BLE FIRMWARE OK\"\r\n");
   Serial.print("PRINT 1,1\r\n");
-  Serial.print("EOP\r\n");
-  Serial.print("A\r\n");
+  // Reset lastLabelW/H so first app print triggers GAPDETECT regardless of size
+  lastLabelW = 81; lastLabelH = 13;
 }
 
 // ============================================================================
@@ -401,9 +469,9 @@ bool isJsonComplete(const String& s) {
 
 class CommandCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
-    std::string v = c->getValue();
-    if (v.empty()) return;
-    bleBuffer += String(v.c_str());
+    String v = c->getValue();
+    if (v.isEmpty()) return;
+    bleBuffer += v;
     if (isJsonComplete(bleBuffer)) {
       // Hand off to loop() — never call Serial inside BLE task.
       // Serial.printf() at 9600 baud blocks for ~260 ms per label,
@@ -428,9 +496,13 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
   void onDisconnect(BLEServer*) override {
     deviceConnected = false;
-    bleBuffer = "";
+    bleBuffer       = "";
     digitalWrite(LED_PIN, LOW);
-    BLEDevice::startAdvertising();
+    // Defer startAdvertising() to loop() — calling it here (while the BLE stack
+    // is still tearing down the connection) causes it to silently fail, leaving
+    // the device invisible to other phones.
+    doStartAdv   = true;
+    disconnectMs = millis();
   }
 };
 
@@ -625,6 +697,13 @@ void setup() {
 //  Loop
 // ============================================================================
 void loop() {
+  // Re-start advertising 500 ms after disconnect so the BLE stack has fully
+  // released the previous connection before we try to accept a new one.
+  if (doStartAdv && (millis() - disconnectMs >= 500)) {
+    doStartAdv = false;
+    BLEDevice::startAdvertising();
+  }
+
   serviceScale();
   pushWeightOverBLE();
 

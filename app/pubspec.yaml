@@ -30,6 +30,10 @@ dependencies:
   # Device fingerprint
   device_info_plus: ^10.1.0
 
+  # Security: encrypted storage + crypto
+  flutter_secure_storage: ^9.2.2
+  crypto: ^3.0.3
+
   # Export / share
   share_plus: ^12.0.2
   csv: ^6.0.0
