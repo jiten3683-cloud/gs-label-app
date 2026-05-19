@@ -31,7 +31,7 @@ android {
     defaultConfig {
         applicationId = "com.jbc.gsprinter"
         minSdk = flutter.minSdkVersion   // Android 6.0+ required for EncryptedSharedPreferences / Keystore
-        targetSdk = 34
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
