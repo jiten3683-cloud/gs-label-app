@@ -59,7 +59,12 @@ class LicenseService {
     if (_installDate.isEmpty) return _trialDays;
     final installed = DateTime.tryParse(_installDate);
     if (installed == null) return _trialDays;
-    final elapsed = DateTime.now().difference(installed).inDays;
+    // Compare calendar dates, not 24-hour blocks — so the counter ticks at
+    // midnight regardless of the exact install time.
+    final installDay = DateTime(installed.year, installed.month, installed.day);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final elapsed = today.difference(installDay).inDays;
     return (_trialDays - elapsed).clamp(0, _trialDays);
   }
 
