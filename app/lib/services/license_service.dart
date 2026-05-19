@@ -1,55 +1,63 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
-const _kInstallDate    = 'install_date';
-const _kLicenseKey     = 'license_key';
-const _kWeighBridgeId  = 'weighbridge_id';
-const _kActivated      = 'license_activated';
-const _kDeviceId       = 'device_id';
-const _kBoundDeviceId  = 'bound_device_id'; // device locked at activation time
-const _trialDays       = 3;
+// ── Encrypted storage keys (all written to Android Keystore / iOS Keychain) ──
+const _kInstallDate   = 'gs_install_dt';
+const _kLicenseKey    = 'gs_lic_key';
+const _kWeighBridgeId = 'gs_wb_id';
+const _kActivated     = 'gs_activated';
+const _kBoundFp       = 'gs_bound_fp';    // device fingerprint at activation time
+const _kActCode       = 'gs_act_code';    // activation code — stored after first use
+const _kChecksum      = 'gs_checksum';    // HMAC-SHA256 of license bundle
+const _kLicenseTs     = 'gs_lic_ts';      // ISO timestamp of activation
+const _kApkSig        = 'gs_apk_sig';     // SHA-256 of APK signing certificate
+const _kExpiry        = 'gs_expiry';
+
+const _trialDays = 3;
+
+// Salts embedded in compiled code — R8 encrypts these strings in release builds.
+const _kHmacSalt    = r'GS$L@b3l#2024!JBC^Pr1nt3r*S3cur3Key';
+const _kActCodeSalt = r'GSL@ct1v@t10n#T0k3n!2024^JBC*Pr1nt';
+const _kActCodeChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 chars, no confusables
 
 enum LicenseState { trial, trialExpired, activated }
 
 class LicenseService {
-  static const _apiUrl =
-      'http://jbcweighingscale.com/admin_ws/api.php';
+  static const _apiUrl    = 'http://jbcweighingscale.com/admin_ws/api.php';
+  static const _secCh     = MethodChannel('com.gslabel.gs_label_app/security');
 
-  SharedPreferences? _prefs;
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+  );
 
-  Future<void> init() async {
-    _prefs = await SharedPreferences.getInstance();
-    // Record installation date on first run
-    if (_prefs!.getString(_kInstallDate) == null) {
-      await _prefs!.setString(
-          _kInstallDate, DateTime.now().toIso8601String());
-    }
-    // Generate/refresh device ID every init (always reflects current device)
-    final currentId = await _buildDeviceId();
-    await _prefs!.setString(_kDeviceId, currentId);
+  // ── In-memory state (populated by init()) ────────────────────────────────────
+  String _fingerprint    = '';
+  bool   _activated      = false;
+  bool   _deviceBound    = false;   // true once activation code verified on this device
+  String _storedActCode  = '';      // activation code persisted after first use
+  String _licenseKey     = '';
+  String _weighBridgeId  = '';
+  String _installDate    = '';
 
-    // Device binding: if activated on a different device, wipe the activation
-    if (_prefs!.getBool(_kActivated) == true) {
-      final boundId = _prefs!.getString(_kBoundDeviceId) ?? '';
-      if (boundId.isNotEmpty && boundId != currentId) {
-        // App data was copied to a different device — revoke
-        await _prefs!.setBool(_kActivated, false);
-        await _prefs!.remove(_kLicenseKey);
-        await _prefs!.remove(_kWeighBridgeId);
-        await _prefs!.remove(_kBoundDeviceId);
-      }
-    }
-  }
+  // ── Public API ────────────────────────────────────────────────────────────────
+  bool   get isActivated       => _activated;
+  /// True once the activation code has been verified on this device.
+  /// Re-activation (expiry/server block) skips the activation code field.
+  bool   get isDeviceBound     => _deviceBound;
+  String get cachedLicenseKey    => _licenseKey;
+  String get cachedWeighBridgeId => _weighBridgeId;
+  String get deviceId            => _fingerprint;   // displayed in login UI
 
-  // ── Trial ───────────────────────────────────────────────────────────────────
   int get trialDaysRemaining {
-    final s = _prefs?.getString(_kInstallDate);
-    if (s == null) return _trialDays;
-    final installed = DateTime.tryParse(s);
+    if (_installDate.isEmpty) return _trialDays;
+    final installed = DateTime.tryParse(_installDate);
     if (installed == null) return _trialDays;
     final elapsed = DateTime.now().difference(installed).inDays;
     return (_trialDays - elapsed).clamp(0, _trialDays);
@@ -57,29 +65,133 @@ class LicenseService {
 
   bool get isTrialActive => trialDaysRemaining > 0;
 
-  // ── License ─────────────────────────────────────────────────────────────────
-  bool get isActivated => _prefs?.getBool(_kActivated) ?? false;
-
-  String get cachedLicenseKey    => _prefs?.getString(_kLicenseKey)    ?? '';
-  String get cachedWeighBridgeId => _prefs?.getString(_kWeighBridgeId) ?? '';
-  String get deviceId            => _prefs?.getString(_kDeviceId)      ?? '';
-
   LicenseState get state {
-    if (isActivated) return LicenseState.activated;
+    if (_activated)    return LicenseState.activated;
     if (isTrialActive) return LicenseState.trial;
     return LicenseState.trialExpired;
   }
 
-  bool get canUseApp =>
-      isActivated || isTrialActive;
+  bool get canUseApp => _activated || isTrialActive;
 
-  // ── API activation ──────────────────────────────────────────────────────────
-  /// Returns null on success, or an error message string on failure.
+  // ── Initialisation ────────────────────────────────────────────────────────────
+  Future<void> init() async {
+    // 1. Build multi-parameter device fingerprint
+    _fingerprint = await _buildFingerprint();
+
+    // 2. Ensure install date is persisted (encrypted)
+    _installDate = await _storage.read(key: _kInstallDate) ?? '';
+    if (_installDate.isEmpty) {
+      _installDate = DateTime.now().toIso8601String();
+      await _storage.write(key: _kInstallDate, value: _installDate);
+    }
+
+    // 3. Read persisted license state
+    final storedAct = await _storage.read(key: _kActivated) ?? 'false';
+    _licenseKey    = await _storage.read(key: _kLicenseKey)    ?? '';
+    _weighBridgeId = await _storage.read(key: _kWeighBridgeId) ?? '';
+    _storedActCode = await _storage.read(key: _kActCode)       ?? '';
+
+    // 4. Device binding — fingerprint must match what was stored at activation
+    final storedFp = await _storage.read(key: _kBoundFp) ?? '';
+
+    // Mark device as bound if it previously completed activation code verification
+    if (_storedActCode.isNotEmpty && storedFp == _fingerprint) {
+      _deviceBound = true;
+    }
+
+    if (storedAct != 'true') { _activated = false; return; }
+    if (storedFp.isNotEmpty && storedFp != _fingerprint) {
+      await _revokeActivation(reason: 'device mismatch');
+      return;
+    }
+
+    // 5. HMAC checksum — detects manual editing of encrypted storage
+    final storedCs = await _storage.read(key: _kChecksum) ?? '';
+    final storedTs = await _storage.read(key: _kLicenseTs) ?? '';
+    if (_licenseKey.isNotEmpty && storedCs.isNotEmpty) {
+      final expected = _computeHmac(_licenseKey, _weighBridgeId, _fingerprint, storedTs);
+      if (storedCs != expected) {
+        await _revokeActivation(reason: 'checksum mismatch');
+        return;
+      }
+    }
+
+    // 6. APK signature — detects repackaged / tampered APK
+    final storedSig  = await _storage.read(key: _kApkSig) ?? '';
+    final currentSig = await _getApkSignature();
+    if (storedSig.isNotEmpty && currentSig.isNotEmpty && currentSig != storedSig) {
+      await _revokeActivation(reason: 'APK signature mismatch');
+      return;
+    }
+
+    _activated = true;
+  }
+
+  // ── Root detection ────────────────────────────────────────────────────────────
+  /// Returns true if the device appears to be rooted.
+  /// Call this after init(); result is advisory — app can warn without blocking.
+  Future<bool> isDeviceRooted() async {
+    if (!Platform.isAndroid) return false;
+    const rootIndicators = [
+      '/system/app/Superuser.apk',
+      '/sbin/su', '/system/bin/su', '/system/xbin/su',
+      '/data/local/xbin/su', '/data/local/bin/su',
+      '/system/sd/xbin/su', '/data/local/su', '/su/bin/su',
+    ];
+    for (final path in rootIndicators) {
+      if (File(path).existsSync()) return true;
+    }
+    return false;
+  }
+
+  // ── Activation code ──────────────────────────────────────────────────────────
+  /// Generates the device-bound activation code for a given license + device.
+  /// This same logic must be mirrored in the vendor's offline generator tool.
+  static String generateActivationCode({
+    required String licenseKey,
+    required String weighBridgeId,
+    required String deviceFingerprint,
+  }) {
+    final key  = utf8.encode(_kActCodeSalt);
+    final data = utf8.encode(
+        '${licenseKey.toUpperCase()}:${weighBridgeId.toUpperCase()}:$deviceFingerprint');
+    final hash = Hmac(sha256, key).convert(data).bytes;
+    final buf  = StringBuffer();
+    for (int i = 0; i < 16; i++) {
+      buf.write(_kActCodeChars[hash[i] % _kActCodeChars.length]);
+    }
+    final s = buf.toString();
+    return '${s.substring(0,4)}-${s.substring(4,8)}-${s.substring(8,12)}-${s.substring(12,16)}';
+  }
+
+  bool _verifyActivationCode(String code, String licenseKey, String weighBridgeId) {
+    final expected = generateActivationCode(
+      licenseKey: licenseKey,
+      weighBridgeId: weighBridgeId,
+      deviceFingerprint: _fingerprint,
+    );
+    return code.toUpperCase().replaceAll('-', '') ==
+           expected.toUpperCase().replaceAll('-', '');
+  }
+
+  // ── Activation ────────────────────────────────────────────────────────────────
+  /// [activationCode] is required only on first activation for a new device.
+  /// Once verified, it is stored encrypted and reused silently on re-activation.
   Future<String?> activate({
     required String licenseKey,
     required String weighBridgeId,
+    String? activationCode,   // null = use stored code (re-activation on bound device)
   }) async {
-    final devId = deviceId;
+    // ── Step 1: verify device-bound activation code (fully offline) ────────────
+    final codeToCheck = activationCode ?? _storedActCode;
+    if (codeToCheck.isEmpty) {
+      return 'Activation code required. Contact support with your Device ID.';
+    }
+    if (!_verifyActivationCode(codeToCheck, licenseKey, weighBridgeId)) {
+      return 'Invalid activation code for this device.\n'
+             'Contact support with your Device ID to get the correct code.';
+    }
+    // ── Step 2: validate with server ──────────────────────────────────────────
     try {
       final resp = await http.post(
         Uri.parse(_apiUrl),
@@ -88,7 +200,7 @@ class LicenseService {
           'tag':           'checkLicense',
           'licenseKey':    licenseKey,
           'weighBridgeId': weighBridgeId,
-          'mac_add':       devId,
+          'mac_add':       _fingerprint,
         },
       ).timeout(const Duration(seconds: 12));
 
@@ -98,80 +210,53 @@ class LicenseService {
 
       final body = resp.body.trim();
       Map<String, dynamic>? json;
-      try {
-        json = jsonDecode(body) as Map<String, dynamic>;
-      } catch (_) {
-        // Plain-text response
-      }
+      try { json = jsonDecode(body) as Map<String, dynamic>; } catch (_) {}
 
-      // ── Success detection ─────────────────────────────────────────────────
-      // Server returns: {"success":1,"error":0,"login":{...},"replyMsg":"..."}
-      bool isSuccess = false;
-      if (json != null) {
-        final successVal = json['success'];
-        final errorVal   = json['error'];
-        // success=1 / error=0  (this server's format)
-        if (successVal != null) {
-          isSuccess = successVal == 1 || successVal == true ||
-              successVal.toString() == '1' || successVal.toString().toLowerCase() == 'true';
-        } else if (errorVal != null) {
-          isSuccess = errorVal == 0 || errorVal == false ||
-              errorVal.toString() == '0';
-        } else {
-          // Fallback: check common status fields
-          final st = (json['status'] ?? json['result'] ?? json['state'] ?? '')
-              .toString().toLowerCase();
-          const ok = {'success', 'valid', 'active', 'activated', 'approved', 'ok', '1', 'yes', 'true'};
-          isSuccess = ok.contains(st);
-        }
-      } else {
-        final b = body.toLowerCase();
-        isSuccess = b.contains('"success":1') || b.contains('"success": 1') ||
-            b.contains('success') || b.contains('valid') || b.contains('active');
-      }
+      final isSuccess = _parseSuccess(json, body);
 
       if (isSuccess) {
-        final login  = json?['login'] as Map<String, dynamic>?;
-        final expiry = login?['expired_on'] as String? ?? '';
+        // Store all sensitive data encrypted in Keystore
+        final ts  = DateTime.now().toIso8601String();
+        final cs  = _computeHmac(licenseKey, weighBridgeId, _fingerprint, ts);
+        final sig = await _getApkSignature();
 
-        await _prefs!.setBool(_kActivated, true);
-        await _prefs!.setString(_kLicenseKey,    licenseKey);
-        await _prefs!.setString(_kWeighBridgeId, weighBridgeId);
-        await _prefs!.setString(_kBoundDeviceId, devId); // lock to this device
-        if (expiry.isNotEmpty) await _prefs!.setString('license_expiry', expiry);
+        await _storage.write(key: _kActivated,    value: 'true');
+        await _storage.write(key: _kLicenseKey,   value: licenseKey);
+        await _storage.write(key: _kWeighBridgeId, value: weighBridgeId);
+        await _storage.write(key: _kBoundFp,      value: _fingerprint);
+        await _storage.write(key: _kActCode,      value: codeToCheck);
+        await _storage.write(key: _kChecksum,     value: cs);
+        await _storage.write(key: _kLicenseTs,    value: ts);
+        if (sig.isNotEmpty) await _storage.write(key: _kApkSig, value: sig);
+
+        final login  = json?['login'] as Map<String, dynamic>?;
+        final expiry = (login?['expired_on'] ?? '').toString();
+        if (expiry.isNotEmpty) await _storage.write(key: _kExpiry, value: expiry);
+
+        _activated     = true;
+        _deviceBound   = true;
+        _storedActCode = codeToCheck;
+        _licenseKey    = licenseKey;
+        _weighBridgeId = weighBridgeId;
         return null; // success
       }
 
-      // ── Failure: extract server message ──────────────────────────────────────
-      final login   = json?['login']    as Map<String, dynamic>?;
-      final replyMsg = json?['replyMsg'] as String? ?? '';
-      final serverMsg = (login?['message'] ?? json?['message'] ?? json?['msg'] ??
-          json?['error_message'] ?? replyMsg).toString().trim();
-
-      if (serverMsg.isNotEmpty && serverMsg != 'null') return serverMsg;
-      return 'Server response: $body';
+      return _parseError(json, body);
     } on SocketException {
       return 'No internet connection — check your network';
     } on HttpException {
       return 'Cannot reach the server — try again later';
-    } catch (e) {
+    } catch (_) {
       return 'Connection timeout — try again';
     }
   }
 
-  /// Prefix on returned string when the failure is a network/connectivity issue.
-  /// Callers use this to show a Retry option instead of the activation form.
   static const networkErrorPrefix = 'NET:';
 
-  /// Called on every app open (and 1-hour idle recheck) when locally activated.
-  /// Returns null on server-confirmed valid.
-  /// Returns 'NET:...' on network/connectivity failure.
-  /// Returns plain string on license rejection (expired, wrong device, etc.).
+  /// Called on every app open to re-verify with the server.
+  /// Returns null if valid, 'NET:...' on connectivity failure, plain string on rejection.
   Future<String?> verifyOnline() async {
-    final key   = cachedLicenseKey;
-    final wb    = cachedWeighBridgeId;
-    final devId = deviceId;
-    if (key.isEmpty || wb.isEmpty) return 'No license stored';
+    if (_licenseKey.isEmpty || _weighBridgeId.isEmpty) return 'No license stored';
 
     try {
       final resp = await http.post(
@@ -179,42 +264,28 @@ class LicenseService {
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: {
           'tag':           'checkLicense',
-          'licenseKey':    key,
-          'weighBridgeId': wb,
-          'mac_add':       devId,
+          'licenseKey':    _licenseKey,
+          'weighBridgeId': _weighBridgeId,
+          'mac_add':       _fingerprint,
         },
       ).timeout(const Duration(seconds: 10));
 
       if (resp.statusCode != 200) {
-        return '${networkErrorPrefix}Server error (${resp.statusCode}) — try again';
+        return '${networkErrorPrefix}Server error (${resp.statusCode})';
       }
 
       final body = resp.body.trim();
       Map<String, dynamic>? json;
       try { json = jsonDecode(body) as Map<String, dynamic>; } catch (_) {}
 
-      bool isValid = false;
-      if (json != null) {
-        final sv = json['success'];
-        if (sv != null) {
-          isValid = sv == 1 || sv == true || sv.toString() == '1';
-        }
-      }
-
-      if (isValid) {
+      if (_parseSuccess(json, body)) {
         final login  = json?['login'] as Map<String, dynamic>?;
-        final expiry = login?['expired_on'] as String? ?? '';
-        if (expiry.isNotEmpty) await _prefs!.setString('license_expiry', expiry);
-        return null; // valid
+        final expiry = (login?['expired_on'] ?? '').toString();
+        if (expiry.isNotEmpty) await _storage.write(key: _kExpiry, value: expiry);
+        return null;
       }
 
-      // Server rejected — extract reason
-      final login    = json?['login']    as Map<String, dynamic>?;
-      final replyMsg = json?['replyMsg'] as String? ?? '';
-      final msg = (login?['message'] ?? json?['message'] ?? json?['msg'] ??
-          replyMsg).toString().trim();
-      return msg.isNotEmpty && msg != 'null' ? msg : 'License expired or invalid';
-
+      return _parseError(json, body) ?? 'License expired or invalid';
     } on SocketException {
       return '${networkErrorPrefix}No internet connection — cannot verify license';
     } catch (_) {
@@ -223,26 +294,92 @@ class LicenseService {
   }
 
   Future<void> deactivate() async {
-    await _prefs?.setBool(_kActivated, false);
-    await _prefs?.remove(_kBoundDeviceId);
-    // Keep _kLicenseKey and _kWeighBridgeId so fields stay pre-filled on re-activation
+    _activated = false;
+    await _storage.write(key: _kActivated, value: 'false');
+    await _storage.delete(key: _kChecksum);
+    await _storage.delete(key: _kLicenseTs);
+    await _storage.delete(key: _kApkSig);
+    // Keep: _kLicenseKey, _kWeighBridgeId  → form stays pre-filled
+    // Keep: _kBoundFp, _kActCode            → device still bound, no code needed on re-activation
   }
 
-  // ── Device ID ───────────────────────────────────────────────────────────────
-  static Future<String> _buildDeviceId() async {
+  // ── Private helpers ───────────────────────────────────────────────────────────
+  Future<void> _revokeActivation({required String reason}) async {
+    _activated     = false;
+    _licenseKey    = '';
+    _weighBridgeId = '';
+    await _storage.write(key: _kActivated, value: 'false');
+    await _storage.delete(key: _kLicenseKey);
+    await _storage.delete(key: _kWeighBridgeId);
+    await _storage.delete(key: _kBoundFp);
+    await _storage.delete(key: _kChecksum);
+    await _storage.delete(key: _kLicenseTs);
+    await _storage.delete(key: _kApkSig);
+  }
+
+  // HMAC-SHA256 of "key:wb:fingerprint:timestamp" — keyed with salt+fingerprint
+  // so the checksum is device-specific and cannot be transplanted
+  String _computeHmac(String key, String wb, String fp, String ts) {
+    final hmacKey = utf8.encode(_kHmacSalt + fp);
+    final data    = utf8.encode('$key:$wb:$fp:$ts');
+    return Hmac(sha256, hmacKey).convert(data).toString();
+  }
+
+  // SHA-256 of android_id + brand + model + board + hardware
+  static Future<String> _buildFingerprint() async {
     try {
-      final info = DeviceInfoPlugin();
       if (Platform.isAndroid) {
-        final android = await info.androidInfo;
-        final id = android.id; // unique per device + signing key
-        return id.isNotEmpty ? id : _fallback();
+        final android = await DeviceInfoPlugin().androidInfo;
+        final raw = '${android.id}|${android.brand}|${android.model}|'
+                    '${android.board}|${android.hardware}';
+        return sha256.convert(utf8.encode(raw)).toString();
       }
     } catch (_) {}
-    return _fallback();
+    // Fallback — only reached if device_info fails
+    return sha256.convert(
+      utf8.encode(DateTime.now().millisecondsSinceEpoch.toString()),
+    ).toString();
   }
 
-  static String _fallback() {
-    // Deterministic from timestamp — only used if device info fails
-    return DateTime.now().millisecondsSinceEpoch.toRadixString(16).toUpperCase();
+  // Native method channel → Android PackageManager signature
+  static Future<String> _getApkSignature() async {
+    try {
+      final sig = await _secCh.invokeMethod<String>('getApkSignature');
+      return sig ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  static bool _parseSuccess(Map<String, dynamic>? json, String body) {
+    if (json != null) {
+      final sv = json['success'];
+      if (sv != null) {
+        return sv == 1 || sv == true || sv.toString() == '1' ||
+               sv.toString().toLowerCase() == 'true';
+      }
+      final ev = json['error'];
+      if (ev != null) {
+        return ev == 0 || ev == false || ev.toString() == '0';
+      }
+      final st = (json['status'] ?? json['result'] ?? json['state'] ?? '')
+          .toString().toLowerCase();
+      const ok = {'success','valid','active','activated','approved','ok','1','yes','true'};
+      return ok.contains(st);
+    }
+    final b = body.toLowerCase();
+    return b.contains('"success":1') || b.contains('"success": 1') ||
+           b.contains('success')     || b.contains('valid') ||
+           b.contains('active');
+  }
+
+  static String? _parseError(Map<String, dynamic>? json, String body) {
+    if (json == null) return 'Server response: $body';
+    final login    = json['login']    as Map<String, dynamic>?;
+    final replyMsg = (json['replyMsg'] ?? '').toString();
+    final msg = (login?['message'] ?? json['message'] ?? json['msg'] ??
+                 json['error_message'] ?? replyMsg).toString().trim();
+    if (msg.isNotEmpty && msg != 'null') return msg;
+    return 'Server response: $body';
   }
 }

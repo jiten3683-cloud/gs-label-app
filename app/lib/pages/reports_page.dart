@@ -486,11 +486,20 @@ class _ReportsPageState extends State<ReportsPage> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(children: [
-                            Text(r['serial'] ?? '',
-                                style: TextStyle(fontWeight: FontWeight.bold,
-                                    color: cs.primary, fontSize: 13)),
+                            Flexible(
+                              flex: 1,
+                              child: Text(r['serial'] ?? '',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontWeight: FontWeight.bold,
+                                      color: cs.primary, fontSize: 13)),
+                            ),
                             const SizedBox(width: 8),
-                            Text(r['product'] ?? '', style: const TextStyle(fontSize: 13)),
+                            Flexible(
+                              flex: 2,
+                              child: Text(r['product'] ?? '',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 13)),
+                            ),
                             if ((r['purity'] as String?)?.isNotEmpty == true) ...[
                               const SizedBox(width: 4),
                               Container(
@@ -505,14 +514,11 @@ class _ReportsPageState extends State<ReportsPage> {
                             ],
                           ]),
                           const SizedBox(height: 2),
-                          Row(children: [
+                          Wrap(spacing: 6, runSpacing: 2, children: [
                             _chip('Net ${(r['net_g'] as num?)?.toStringAsFixed(3) ?? '0'} g'),
-                            const SizedBox(width: 6),
                             _chip('Gross ${(r['gross_g'] as num?)?.toStringAsFixed(3) ?? '0'} g'),
-                            if ((r['amount'] as num? ?? 0) > 0) ...[
-                              const SizedBox(width: 6),
+                            if ((r['amount'] as num? ?? 0) > 0)
                               _chip('₹ ${(r['amount'] as num).toStringAsFixed(0)}'),
-                            ],
                           ]),
                           const SizedBox(height: 2),
                           Text(_fmtDT.format(ts),

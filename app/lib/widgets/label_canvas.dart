@@ -66,15 +66,19 @@ class LabelCanvas extends StatelessWidget {
     final type = el['type'] as String? ?? '';
     switch (type) {
       case 'text':
-        final font = el['font'] as String? ?? '3';
-        final ys   = (el['ys'] as num? ?? 1).toInt();
-        final text = el['text'] as String? ?? '';
-        final dotH = (kFontDotH[font] ?? 24).toDouble();
-        final fs   = (dotH * ys * scale).clamp(4.0, 100.0);
+        final font   = el['font'] as String? ?? '3';
+        final ys     = (el['ys'] as num? ?? 1).toInt();
+        final isBold = el['bold'] as bool? ?? false;
+        final text   = el['text'] as String? ?? '';
+        final dotH   = (kFontDotH[font] ?? 24).toDouble();
+        final fs     = (dotH * ys * scale).clamp(4.0, 100.0);
         return Text(
           text.isEmpty ? ' ' : text,
-          style: TextStyle(fontSize: fs, color: Colors.black,
-              fontFamily: 'monospace', height: 1.1),
+          style: TextStyle(
+            fontSize: fs, color: Colors.black,
+            fontFamily: 'monospace', height: 1.1,
+            fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
+          ),
         );
 
       case 'qr':

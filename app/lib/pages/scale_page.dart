@@ -24,6 +24,16 @@ String _expandDots(String line, int wMm) {
   return '${parts[0]}${List.filled(dots, '.').join()}${parts[1]}';
 }
 
+// Read explicit wt field; fall back to prefix-based inference for old templates.
+int _wtTypeFrom(Map m) {
+  final v = m['wt'];
+  if (v is int) return v.clamp(0, 2);
+  final pfx = (m['pre'] as String? ?? '').toLowerCase();
+  if (pfx.contains('gross')) return 1;
+  if (pfx.contains('tare'))  return 2;
+  return 0;
+}
+
 // Resolve all {variables} in a string from a LabelContext
 String _resolveCtx(String s, LabelContext ctx) => s
     .replaceAll('{net}',      ctx.netStr)
@@ -67,7 +77,7 @@ class _ScalePageState extends State<ScalePage> {
   final _manGrossCtrl     = TextEditingController(text: '0.000');
   final _manTareCtrl      = TextEditingController(text: '0.000');
 
-  // App-side tare override for live mode (updates instantly, no BLE roundtrip)
+  // App-side tare for live mode — editable by user or set by TARE button
   double _appTareG        = 0.0;
   final _appTareCtrl      = TextEditingController(text: '0.000');
 
@@ -249,15 +259,23 @@ class _ScalePageState extends State<ScalePage> {
 
   // ── Resolve template lines → TSPL elements ───────────────────────────────────
   List<Map<String, dynamic>> _buildFromLines(
-      List<String> lines, LabelContext ctx, int wMm) {
+      List<String> lines, LabelContext ctx, int wMm, [int hMm = 25]) {
     final elems = <Map<String, dynamic>>[];
-    int y = 8;
+    final hDots = hMm * 8;
+    // Small labels (≤15 mm tall): font-2 (20 dots) with tight 20-dot step packs
+    // 4 lines into 80 dots (10 mm). Larger labels keep font-3 (24 dots) + spacing.
+    final bool small = hMm <= 15;
+    final String font = small ? '2' : '3';
+    final int fontH   = small ? 20 : 24;
+    final int step    = small ? 20 : 32;
+    int y = small ? 0 : 8;
     for (final raw in lines) {
-      if (raw.trim().isEmpty) { y += 20; continue; }
-      elems.add({'type': 'text', 'x': 8, 'y': y, 'font': '3',
+      if (y + fontH > hDots) break;
+      if (raw.trim().isEmpty) { y += step ~/ 2; continue; }
+      elems.add({'type': 'text', 'x': 8, 'y': y, 'font': font,
           'xs': 1, 'ys': 1, 'rot': 0,
           'text': _resolveCtx(_expandDots(raw, wMm), ctx)});
-      y += 32;
+      y += step;
     }
     return elems;
   }
@@ -268,13 +286,16 @@ class _ScalePageState extends State<ScalePage> {
     try {
       final list = jsonDecode(tplJson);
       if (list is! List) return [];
-      return list.whereType<Map>().map<Map<String, dynamic>>((m) {
+      final result = <Map<String, dynamic>>[];
+      for (final m in list.whereType<Map>()) {
         final t = ElType.values.firstWhere(
             (e) => e.name == (m['t'] ?? 'text'), orElse: () => ElType.text);
-        return LabelElement(
+        final isBold = m['bold'] as bool? ?? false;
+        final resolved = LabelElement(
           type: t, x: m['x'] ?? 10, y: m['y'] ?? 10,
           text: m['text'] ?? '', font: m['font'] ?? '3',
           xScale: m['xs'] ?? 1, yScale: m['ys'] ?? 1, rotation: m['rot'] ?? 0,
+          bold: isBold,
           data: m['data'] ?? '', barcodeType: m['btype'] ?? '128',
           barcodeHeight: m['bh'] ?? 60, barcodeWidth: m['bw'] ?? 120,
           qrEcc: m['ecc'] ?? 'M', qrSize: m['qs'] ?? 4,
@@ -287,21 +308,98 @@ class _ScalePageState extends State<ScalePage> {
           logoHeightDots: m['logo_h'] as int? ?? 48,
           prefix: m['pre'] ?? '', suffix: m['suf'] ?? '',
           decimals: m['dec'] ?? 3, unit: m['unit'] ?? 'g',
+          wtType: _wtTypeFrom(m),
         ).toJson(ctx);
-      }).toList();
+        result.add(resolved);
+        // Bold: print text twice with 1-dot x offset (double-strike thermal bold)
+        if (isBold && resolved['type'] == 'text') {
+          final copy = Map<String, dynamic>.from(resolved);
+          copy['x'] = (resolved['x'] as int) + 1;
+          result.add(copy);
+        }
+      }
+      return result;
     } catch (_) { return []; }
+  }
+
+  // Font character heights in printer dots at 203 DPI
+  static const Map<String, int> _kFontDotH = {
+    '1': 12, '2': 20, '3': 24, '4': 32, '5': 48, '6': 19, '7': 27, '8': 21,
+  };
+
+  // Clamp element positions so no content overflows the label boundary.
+  // The app canvas clips visually (Clip.hardEdge) but the printer does not —
+  // this ensures what the preview shows is what actually prints.
+  List<Map<String, dynamic>> _clampToLabel(
+      List<Map<String, dynamic>> elems, int wDots, int hDots) {
+    final out = <Map<String, dynamic>>[];
+    for (final e in elems) {
+      final type = e['type'] as String? ?? '';
+      final x = (e['x'] as num? ?? 0).toInt();
+      final y = (e['y'] as num? ?? 0).toInt();
+      if (x >= wDots || y >= hDots) continue;   // anchor completely outside
+      final c = Map<String, dynamic>.from(e);
+      switch (type) {
+        case 'text':
+          final ys    = (e['ys'] as num? ?? 1).toInt();
+          final textH = (_kFontDotH[e['font'] as String? ?? '3'] ?? 24) * ys;
+          if (y + textH > hDots) c['y'] = (hDots - textH).clamp(0, hDots - 1);
+        case 'qr':
+          final qrDots = (e['size'] as num? ?? 4).toInt() * 25;
+          if (x + qrDots > wDots) c['x'] = (wDots - qrDots).clamp(0, wDots - 1);
+          if (y + qrDots > hDots) c['y'] = (hDots - qrDots).clamp(0, hDots - 1);
+        case 'bar':
+          final barH = (e['height'] as num? ?? 60).toInt();
+          if (y + barH > hDots) {
+            final clamped = (hDots - y).clamp(8, barH);
+            c['height'] = clamped;
+          }
+      }
+      out.add(c);
+    }
+    return out;
+  }
+
+  // For small labels: if all content elements are in the bottom half of the label
+  // (caused by _add() clamping), shift them up so the first element starts near y=0.
+  // Box and logo elements keep their positions (they are layout anchors).
+  List<Map<String, dynamic>> _normalizeTop(
+      List<Map<String, dynamic>> elems, int hDots) {
+    final contentTypes = {'text', 'qr', 'bar'};
+    int minY = hDots;
+    for (final e in elems) {
+      if (contentTypes.contains(e['type'] as String? ?? '')) {
+        final y = (e['y'] as num? ?? 0).toInt();
+        if (y < minY) minY = y;
+      }
+    }
+    if (minY <= hDots ~/ 2) return elems; // already in top half, nothing to do
+    final shift = minY - 4;               // shift so top element lands at y=4 (0.5 mm margin)
+    if (shift <= 0) return elems;
+    return elems.map((e) {
+      if (!contentTypes.contains(e['type'] as String? ?? '')) return e;
+      final c = Map<String, dynamic>.from(e);
+      c['y'] = ((e['y'] as num? ?? 0).toInt() - shift).clamp(0, hDots - 1);
+      return c;
+    }).toList();
   }
 
   // ── Get resolved elements for a template ────────────────────────────────────
   List<Map<String, dynamic>> _resolveTemplate(
       Map<String, dynamic> tplRow, LabelContext ctx) {
+    final wMm  = tplRow['width_mm']  as int? ?? 50;
+    final hMm  = tplRow['height_mm'] as int? ?? 25;
     // Designer elements take priority — they support all types (QR, barcode, logo…)
     final elems = _buildFromElements(tplRow['json'] as String? ?? '[]', ctx);
-    if (elems.isNotEmpty) return elems;
+    if (elems.isNotEmpty) {
+      var clamped = _clampToLabel(elems, wMm * 8, hMm * 8);
+      // For small labels, prevent content being stuck at bottom due to _add() clamping.
+      if (hMm <= 15) clamped = _normalizeTop(clamped, hMm * 8);
+      return clamped;
+    }
     // Fall back to line-based text when no designer elements exist
-    final wMm   = tplRow['width_mm'] as int? ?? 50;
     final lines = DbService.parseLines(tplRow);
-    return _buildFromLines(lines, ctx, wMm);
+    return _buildFromLines(lines, ctx, wMm, hMm);
   }
 
   // ── Runtime preview ──────────────────────────────────────────────────────────
@@ -457,7 +555,11 @@ class _ScalePageState extends State<ScalePage> {
                 net: _resolvedNet, unit: _unit,
                 onCapture: ble.isConnected ? _captureFromScale : null,
                 onChanged: () => setState(() {}))
-            : _WeightCard(ble: ble, unit: _unit),
+            : _WeightCard(
+                ble: ble, unit: _unit,
+                appTareCtrl: _appTareCtrl, appTareG: _appTareG,
+                onTareChanged: (v) => setState(() => _appTareG = v),
+              ),
         const SizedBox(height: 4),
 
         // ── Scale raw debug (collapsed by default) ──────────────────────────
@@ -513,13 +615,12 @@ class _ScalePageState extends State<ScalePage> {
           if (!_manualMode) ...[
             Expanded(child: FilledButton.icon(
               onPressed: ble.isConnected ? () {
-                // App-side tare: instant display update without BLE roundtrip
                 final g = ble.grossG;
                 setState(() {
                   _appTareG = g;
                   _appTareCtrl.text = g.toStringAsFixed(3);
                 });
-                ble.tare(); // also sync ESP32 tare for accurate net on printer
+                ble.tare();
               } : null,
               icon: const Icon(Icons.exposure_zero, size: 18), label: const Text('TARE'),
             )),
@@ -541,30 +642,6 @@ class _ScalePageState extends State<ScalePage> {
             onChanged: (v) => setState(() => _unit = v ?? 'g'),
           ),
         ]),
-        // ── Manual tare override (live mode) ────────────────────────────────
-        if (!_manualMode) ...[
-          const SizedBox(height: 6),
-          Row(children: [
-            const Icon(Icons.remove_circle_outline, size: 15, color: Colors.grey),
-            const SizedBox(width: 4),
-            const Text('Tare:', style: TextStyle(fontSize: 12, color: Colors.grey)),
-            const SizedBox(width: 6),
-            SizedBox(width: 90, child: TextField(
-              controller: _appTareCtrl,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              style: const TextStyle(fontSize: 12),
-              decoration: const InputDecoration(
-                isDense: true, border: OutlineInputBorder(),
-                contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                suffixText: 'g',
-              ),
-              onChanged: (v) => setState(() => _appTareG = double.tryParse(v) ?? 0),
-            )),
-            const SizedBox(width: 8),
-            Text('Net: ${_fmt(_resolvedNet, _unit)}',
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-          ]),
-        ],
 
         // ── Stone weight ────────────────────────────────────────────────────
         const SizedBox(height: 12),
@@ -780,23 +857,38 @@ class _ScalePageState extends State<ScalePage> {
 }
 
 // =============================================================================
-// Green-on-black live weight card
+// Green-on-black live weight card with editable tare
 class _WeightCard extends StatelessWidget {
-  final BleService ble; final String unit;
-  const _WeightCard({required this.ble, required this.unit});
+  final BleService ble;
+  final String unit;
+  final TextEditingController appTareCtrl;
+  final double appTareG;
+  final ValueChanged<double> onTareChanged;
+
+  const _WeightCard({
+    required this.ble,
+    required this.unit,
+    required this.appTareCtrl,
+    required this.appTareG,
+    required this.onTareChanged,
+  });
 
   @override Widget build(BuildContext context) {
     final stable = ble.stable;
     final col    = stable ? Colors.greenAccent : Colors.orange;
+    final net    = (ble.grossG - appTareG).clamp(0.0, double.infinity);
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
       decoration: BoxDecoration(
         color: Colors.black,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: stable ? Colors.green.shade700 : Colors.orange.shade700, width: 1.5),
+        border: Border.all(
+            color: stable ? Colors.green.shade700 : Colors.orange.shade700, width: 1.5),
       ),
       child: Column(children: [
+        // ── NET (app-computed: gross − appTare) ──────────────────────────────
         Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('NET', style: TextStyle(fontSize: 13, color: Colors.grey.shade400,
@@ -811,26 +903,88 @@ class _WeightCard extends StatelessWidget {
             ]),
           ]),
           const Spacer(),
-          Text(_fmt(ble.netG, unit),
-              style: TextStyle(fontSize: 44, fontWeight: FontWeight.bold,
-                  fontFamily: 'monospace', color: col, letterSpacing: 1)),
+          Flexible(child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerRight,
+            child: Text(_fmt(net, unit),
+                style: TextStyle(fontSize: 44, fontWeight: FontWeight.bold,
+                    fontFamily: 'monospace', color: col, letterSpacing: 1)),
+          )),
         ]),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         Divider(color: Colors.grey.shade800, height: 1),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
+        // ── GROSS (read-only) + TARE (editable) ─────────────────────────────
         Row(children: [
-          Expanded(child: _wLbl('GROSS', _fmt(ble.grossG, unit))),
-          Expanded(child: _wLbl('TARE',  _fmt(ble.tareG,  unit))),
+          Expanded(child: _wCard('GROSS', _fmt(ble.grossG, unit), Colors.white)),
+          const SizedBox(width: 8),
+          Expanded(child: _editableTare()),
         ]),
+        if (appTareG == 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(children: [
+              Icon(Icons.info_outline, size: 12, color: Colors.orange.shade400),
+              const SizedBox(width: 4),
+              Flexible(child: Text('Tare=0: label will print Gross=Net. Set tare first.',
+                  style: TextStyle(fontSize: 10, color: Colors.orange.shade400))),
+            ]),
+          ),
       ]),
     );
   }
 
-  Widget _wLbl(String l, String v) => Column(crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(l, style: TextStyle(fontSize: 10, color: Colors.grey.shade500, letterSpacing: 1.5)),
-        Text(v, style: const TextStyle(fontSize: 16, color: Colors.white70, fontFamily: 'monospace')),
-      ]);
+  // Editable tare tile — matches the visual style of _wCard but with a TextField
+  Widget _editableTare() => Container(
+    padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+    decoration: BoxDecoration(
+      color: Colors.grey.shade900,
+      borderRadius: BorderRadius.circular(6),
+      border: Border.all(color: Colors.orange.shade800),
+    ),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('TARE (edit)', style: TextStyle(fontSize: 9, color: Colors.orange.shade400,
+          letterSpacing: 1.5, fontWeight: FontWeight.w500)),
+      const SizedBox(height: 2),
+      TextField(
+        controller: appTareCtrl,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        onChanged: (s) {
+          final v = double.tryParse(s);
+          if (v != null && v >= 0) onTareChanged(v);
+        },
+        style: TextStyle(fontSize: 22, color: Colors.orange.shade300,
+            fontFamily: 'monospace', fontWeight: FontWeight.w500),
+        decoration: InputDecoration(
+          isDense: true,
+          contentPadding: EdgeInsets.zero,
+          suffixText: 'g',
+          suffixStyle: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+          enabledBorder: const UnderlineInputBorder(
+              borderSide: BorderSide(color: Colors.transparent)),
+          focusedBorder: UnderlineInputBorder(
+              borderSide: BorderSide(color: Colors.orange.shade400, width: 1.5)),
+        ),
+      ),
+    ]),
+  );
+
+  Widget _wCard(String label, String value, Color valueColor) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+    decoration: BoxDecoration(
+      color: Colors.grey.shade900,
+      borderRadius: BorderRadius.circular(6),
+      border: Border.all(color: Colors.grey.shade800),
+    ),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label, style: TextStyle(fontSize: 9, color: Colors.grey.shade500,
+          letterSpacing: 2.0, fontWeight: FontWeight.w500)),
+      const SizedBox(height: 3),
+      Text(value, style: TextStyle(fontSize: 22, color: valueColor,
+          fontFamily: 'monospace', fontWeight: FontWeight.w500),
+          overflow: TextOverflow.ellipsis, maxLines: 1),
+    ]),
+  );
 }
 
 // =============================================================================
@@ -843,22 +997,36 @@ class _ManualWeightPanel extends StatelessWidget {
       required this.net, required this.unit, required this.onCapture, required this.onChanged});
 
   @override Widget build(BuildContext context) {
-    Widget wf(TextEditingController c, String label) => Expanded(child: TextField(
-      controller: c,
-      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-      onChanged: (_) => onChanged(),
-      style: const TextStyle(color: Colors.white70),
-      decoration: InputDecoration(
-        labelText: label, suffixText: 'g', isDense: true,
-        labelStyle: TextStyle(color: Colors.grey.shade400),
-        border: OutlineInputBorder(borderSide: BorderSide(color: Colors.grey.shade700)),
-        enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.grey.shade700)),
-        focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: Colors.green)),
+    Widget wf(TextEditingController c, String label, Color labelColor, Color textColor) =>
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label, style: TextStyle(fontSize: 9, color: labelColor,
+          letterSpacing: 2.0, fontWeight: FontWeight.w500)),
+      const SizedBox(height: 4),
+      TextField(
+        controller: c,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        onChanged: (_) => onChanged(),
+        style: TextStyle(color: textColor, fontSize: 22,
+            fontFamily: 'monospace', fontWeight: FontWeight.w500),
+        decoration: InputDecoration(
+          suffixText: 'g',
+          suffixStyle: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          enabledBorder: OutlineInputBorder(
+            borderSide: BorderSide(color: Colors.grey.shade700),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderSide: const BorderSide(color: Colors.green, width: 2),
+            borderRadius: BorderRadius.circular(6),
+          ),
+        ),
       ),
-    ));
+    ]));
 
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
         color: Colors.black,
         borderRadius: BorderRadius.circular(12),
@@ -881,17 +1049,34 @@ class _ManualWeightPanel extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2)),
             ),
         ]),
-        const SizedBox(height: 10),
-        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Text('NET', style: TextStyle(fontSize: 13, color: Colors.grey.shade400,
-              letterSpacing: 2)),
-          const Spacer(),
-          Text(_fmt(net < 0 ? 0 : net, unit),
-              style: const TextStyle(fontSize: 44, fontWeight: FontWeight.bold,
-                  fontFamily: 'monospace', color: Colors.greenAccent)),
+        const SizedBox(height: 12),
+        Row(children: [
+          wf(grossCtrl, 'GROSS', Colors.grey.shade400, Colors.white),
+          const SizedBox(width: 10),
+          wf(tareCtrl,  'TARE',  Colors.orange.shade400, Colors.orange.shade200),
         ]),
-        const SizedBox(height: 10),
-        Row(children: [wf(grossCtrl, 'Gross (g)'), const SizedBox(width: 8), wf(tareCtrl, 'Tare (g)')]),
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.green.shade900.withOpacity(0.25),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.green.shade800),
+          ),
+          child: Row(children: [
+            Text('NET', style: TextStyle(fontSize: 11, color: Colors.grey.shade400,
+                letterSpacing: 2, fontWeight: FontWeight.w500)),
+            const Spacer(),
+            Flexible(child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Text(_fmt(net < 0 ? 0 : net, unit),
+                  style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold,
+                      fontFamily: 'monospace', color: Colors.greenAccent)),
+            )),
+          ]),
+        ),
       ]),
     );
   }
@@ -1035,7 +1220,8 @@ class _PrintPreview extends StatelessWidget {
   Widget _row(BuildContext context, String label, String value, Color valueColor) =>
       Padding(padding: const EdgeInsets.only(bottom: 4), child: Row(children: [
         Expanded(child: Text(label, style: const TextStyle(color: Colors.grey))),
-        Text(value, style: TextStyle(fontWeight: FontWeight.bold, color: valueColor)),
+        Flexible(child: Text(value, style: TextStyle(fontWeight: FontWeight.bold, color: valueColor),
+            overflow: TextOverflow.ellipsis)),
       ]));
 }
 

@@ -13,6 +13,7 @@ import 'package:intl/intl.dart';
 
 import '../models/label_element.dart';
 import '../services/db_service.dart';
+import '../widgets/ai_generate_dialog.dart';
 import '../widgets/label_canvas.dart';
 
 // ─── Sample data ──────────────────────────────────────────────────────────────
@@ -47,6 +48,18 @@ const _varHints = <String, String>{
   '{address}':'Business address', '{phone}':'Phone number',
   '{gst}':'GST number',
 };
+
+// Infer weight type from stored 'wt' field, falling back to prefix text for
+// backward compatibility with templates saved before the 'wt' field was added.
+int _inferWtType(Map<String, dynamic> m) {
+  final stored = m['wt'];
+  if (stored is int) return stored.clamp(0, 2);
+  // Legacy: guess from prefix
+  final pfx = (m['pre'] as String? ?? '').toLowerCase();
+  if (pfx.contains('gross')) return 1;
+  if (pfx.contains('tare'))  return 2;
+  return 0;
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  Template List
@@ -185,6 +198,36 @@ class _LabelStudioState extends State<LabelStudioPage> {
     }
   }
 
+  Future<void> _openAiGenerator() async {
+    // Step 1: pick label size
+    int wMm = 50, hMm = 25;
+    final sizes = await showDialog<(int, int)>(
+      context: context,
+      builder: (_) => _SizePicker(initialW: wMm, initialH: hMm),
+    );
+    if (sizes == null || !mounted) return;
+    (wMm, hMm) = sizes;
+
+    // Step 2: show AI dialog
+    final elements = await showDialog<List<Map<String, dynamic>>>(
+      context: context,
+      builder: (_) => AiGenerateDialog(widthMm: wMm, heightMm: hMm),
+    );
+    if (elements == null || elements.isEmpty || !mounted) return;
+
+    // Step 3: open editor with AI-generated elements as an unsaved template
+    final fakeRow = <String, dynamic>{
+      'name':      'AI Generated',
+      'width_mm':  wMm,
+      'height_mm': hMm,
+      'gap_mm':    3,
+      'json':      jsonEncode(elements),
+      'lines':     '[]',
+      'updated':   DateTime.now().millisecondsSinceEpoch,
+    };
+    _openEditor(row: fakeRow);
+  }
+
   void _openEditor({Map<String, dynamic>? row}) async {
     await Navigator.push(context, MaterialPageRoute(
       builder: (_) => Provider.value(
@@ -210,7 +253,8 @@ class _LabelStudioState extends State<LabelStudioPage> {
       type: t, x: m['x'] as int? ?? 10, y: m['y'] as int? ?? 10,
       text: m['text'] as String? ?? '', font: m['font'] as String? ?? '3',
       xScale: m['xs'] as int? ?? 1, yScale: m['ys'] as int? ?? 1,
-      rotation: m['rot'] as int? ?? 0, data: m['data'] as String? ?? '',
+      rotation: m['rot'] as int? ?? 0, bold: m['bold'] as bool? ?? false,
+      data: m['data'] as String? ?? '',
       barcodeType: m['btype'] as String? ?? '128',
       barcodeHeight: m['bh'] as int? ?? 60, barcodeWidth: m['bw'] as int? ?? 120,
       qrEcc: m['ecc'] as String? ?? 'M', qrSize: m['qs'] as int? ?? 4,
@@ -222,6 +266,7 @@ class _LabelStudioState extends State<LabelStudioPage> {
       logoBmpW: m['logo_bmpw'] as int? ?? 0,
       logoWidthDots: m['logo_w'] as int? ?? 80,
       logoHeightDots: m['logo_h'] as int? ?? 48,
+      wtType: _inferWtType(m),
     );
   }
 
@@ -335,12 +380,149 @@ class _LabelStudioState extends State<LabelStudioPage> {
             );
           },
         ),
-        Positioned(right: 16, bottom: 16, child: FloatingActionButton.extended(
-          onPressed: () => _openEditor(),
-          icon: const Icon(Icons.add), label: const Text('New Template'),
-        )),
+        Positioned(
+          right: 16, bottom: 16,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            FloatingActionButton.extended(
+              heroTag: 'fab_ai',
+              onPressed: _openAiGenerator,
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('AI Generate'),
+              backgroundColor: Colors.amber.shade700,
+              foregroundColor: Colors.white,
+            ),
+            const SizedBox(height: 12),
+            FloatingActionButton.extended(
+              heroTag: 'fab_new',
+              onPressed: () => _openEditor(),
+              icon: const Icon(Icons.add),
+              label: const Text('New Template'),
+            ),
+          ]),
+        ),
       ])),   // Stack + Expanded
       ]),    // Column
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Size picker dialog used before AI generation
+// ─────────────────────────────────────────────────────────────────────────────
+class _SizePicker extends StatefulWidget {
+  final int initialW, initialH;
+  const _SizePicker({required this.initialW, required this.initialH});
+  @override State<_SizePicker> createState() => _SizePickerState();
+}
+
+class _SizePickerState extends State<_SizePicker> {
+  late int _w, _h;
+  static const _presets = [
+    ('50 × 25', 50, 25),
+    ('60 × 30', 60, 30),
+    ('80 × 40', 80, 40),
+    ('100 × 50', 100, 50),
+  ];
+
+  @override void initState() {
+    super.initState();
+    _w = widget.initialW;
+    _h = widget.initialH;
+  }
+
+  @override Widget build(BuildContext context) {
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+
+          // Header
+          const Row(children: [
+            Icon(Icons.auto_awesome, color: Colors.amber),
+            SizedBox(width: 8),
+            Text('Step 1 — Label Size',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          ]),
+          const SizedBox(height: 4),
+          const Text('Pick a preset or enter custom dimensions (mm):',
+              style: TextStyle(fontSize: 12, color: Colors.grey)),
+          const SizedBox(height: 16),
+
+          // Presets
+          Wrap(spacing: 8, runSpacing: 8,
+            children: _presets.map((p) {
+              final sel = _w == p.$2 && _h == p.$3;
+              return ChoiceChip(
+                label: Text('${p.$1} mm'),
+                selected: sel,
+                onSelected: (_) => setState(() { _w = p.$2; _h = p.$3; }),
+              );
+            }).toList()),
+          const SizedBox(height: 20),
+
+          // Custom W / H fields — well separated from buttons
+          const Text('Custom size:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(child: TextFormField(
+              initialValue: '$_w',
+              keyboardType: TextInputType.number,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: 'Width (mm)',
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              ),
+              onChanged: (s) {
+                final v = int.tryParse(s);
+                if (v != null && v >= 10) setState(() => _w = v);
+              },
+            )),
+            const SizedBox(width: 12),
+            Expanded(child: TextFormField(
+              initialValue: '$_h',
+              keyboardType: TextInputType.number,
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                labelText: 'Height (mm)',
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              ),
+              onChanged: (s) {
+                final v = int.tryParse(s);
+                if (v != null && v >= 5) setState(() => _h = v);
+              },
+            )),
+          ]),
+          const SizedBox(height: 8),
+          Text('Selected: $_w × $_h mm',
+              style: TextStyle(fontSize: 12,
+                  color: Theme.of(context).colorScheme.primary,
+                  fontWeight: FontWeight.w600),
+              textAlign: TextAlign.center),
+          const SizedBox(height: 24),
+
+          // Action buttons — clearly separated at the bottom
+          Row(children: [
+            Expanded(child: OutlinedButton(
+              onPressed: () => Navigator.pop(context),
+              style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14)),
+              child: const Text('Cancel'),
+            )),
+            const SizedBox(width: 12),
+            Expanded(flex: 2, child: FilledButton.icon(
+              onPressed: () => Navigator.pop(context, (_w, _h)),
+              icon: const Icon(Icons.arrow_forward, size: 18),
+              label: const Text('Next: Describe Label'),
+              style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14)),
+            )),
+          ]),
+        ]),
+      ),
     );
   }
 }
@@ -413,7 +595,8 @@ class _LabelEditorState extends State<_LabelEditorPage> {
       type: t, x: m['x'] as int? ?? 10, y: m['y'] as int? ?? 10,
       text: m['text'] as String? ?? '', font: m['font'] as String? ?? '3',
       xScale: m['xs'] as int? ?? 1, yScale: m['ys'] as int? ?? 1,
-      rotation: m['rot'] as int? ?? 0, data: m['data'] as String? ?? '',
+      rotation: m['rot'] as int? ?? 0, bold: m['bold'] as bool? ?? false,
+      data: m['data'] as String? ?? '',
       barcodeType: m['btype'] as String? ?? '128',
       barcodeHeight: m['bh'] as int? ?? 60, barcodeWidth: m['bw'] as int? ?? 120,
       qrEcc: m['ecc'] as String? ?? 'M', qrSize: m['qs'] as int? ?? 4,
@@ -425,16 +608,19 @@ class _LabelEditorState extends State<_LabelEditorPage> {
       logoBmpW: m['logo_bmpw'] as int? ?? 0,
       logoWidthDots: m['logo_w'] as int? ?? 80,
       logoHeightDots: m['logo_h'] as int? ?? 48,
+      wtType: _inferWtType(m),
     );
   }
 
   Map<String, dynamic> _toMap(LabelElement el) => {
     't': el.type.name, 'x': el.x, 'y': el.y,
     'text': el.text, 'font': el.font, 'xs': el.xScale, 'ys': el.yScale, 'rot': el.rotation,
+    'bold': el.bold,
     'data': el.data, 'btype': el.barcodeType, 'bh': el.barcodeHeight, 'bw': el.barcodeWidth,
     'ecc': el.qrEcc, 'qs': el.qrSize,
     'xe': el.xEnd, 'ye': el.yEnd, 'th': el.thickness,
     'pre': el.prefix, 'suf': el.suffix,
+    'wt': el.wtType,
     // Logo fields
     'logo_path': el.logoPath, 'logo_bmp': el.logoBmpHex, 'logo_bmpw': el.logoBmpW,
     'logo_w': el.logoWidthDots, 'logo_h': el.logoHeightDots,
@@ -479,10 +665,16 @@ class _LabelEditorState extends State<_LabelEditorPage> {
   }
 
   void _add(ElType t) {
-    // Smart placement: stack below last element, centered horizontally
-    final usedY = _elements.isEmpty ? 0 : _elements.map((e) => e.y).reduce((a, b) => a > b ? a : b) + 32;
+    // Smart placement: stack below last element, centered horizontally.
+    // For small labels (≤15mm), use a tighter 20-dot step and 20-dot font guard
+    // so elements spread from top to bottom instead of all clamping to the same y.
+    final bool small = _hMm <= 15;
+    final int  addStep  = small ? 20 : 32;
+    final int  fontGuard = small ? 20 : 24;   // min clearance at bottom
+    final usedY = _elements.isEmpty ? 0
+        : _elements.map((e) => e.y).reduce((a, b) => a > b ? a : b) + addStep;
     final cx    = _wMm * 8 ~/ 2;
-    final el = LabelElement(type: t, x: 16, y: usedY.clamp(0, _hMm * 8 - 24));
+    final el = LabelElement(type: t, x: 16, y: usedY.clamp(0, _hMm * 8 - fontGuard));
     switch (t) {
       case ElType.text:     el.text   = '{product} {purity}'; el.x = 8;
       case ElType.weight:   el.prefix = 'Net: '; el.x = 8;
@@ -490,10 +682,13 @@ class _LabelEditorState extends State<_LabelEditorPage> {
       case ElType.dateTime: el.prefix = ''; el.x = 8;
       case ElType.qr:
         el.data = '{serial}|{net}|{product}';
-        el.x = (_wMm * 8 - el.qrSize * 16) ~/ 2;  // center
+        // Cell size: fit QR in the shorter label dimension (≈25 modules per side)
+        final smallSide = (_wMm < _hMm ? _wMm : _hMm) * 8;
+        el.qrSize = (smallSide ~/ 30).clamp(2, 10);
+        el.x = (_wMm * 8 - el.qrSize * 25) ~/ 2;
       case ElType.bar:
         el.data = '{serial}'; el.barcodeWidth = (_wMm * 8 - 32).clamp(80, 400);
-        el.x = 16; el.barcodeHeight = 48;
+        el.x = 16; el.barcodeHeight = (_hMm * 8 ~/ 2).clamp(24, 48);
       case ElType.box:
         el.x = 0; el.y = 0;
         el.xEnd = _wMm * 8; el.yEnd = _hMm * 8;
@@ -1119,6 +1314,34 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
             onChanged: (v) { cb(v); _sync(); }),
       ]);
 
+  Widget _boldBtn(LabelElement el) {
+    final isBold = el.bold;
+    final cs = Theme.of(context).colorScheme;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('Bold', style: TextStyle(fontSize: 10, color: Colors.grey)),
+      const SizedBox(height: 2),
+      GestureDetector(
+        onTap: () {
+          setState(() => el.bold = !el.bold);
+          widget.onChange();
+        },
+        child: Container(
+          width: 36, height: 32,
+          decoration: BoxDecoration(
+            color: isBold ? cs.primary : null,
+            border: Border.all(color: isBold ? cs.primary : Colors.grey.shade400),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          alignment: Alignment.center,
+          child: Text('B', style: TextStyle(
+            fontSize: 17, fontWeight: FontWeight.bold,
+            color: isBold ? cs.onPrimary : Colors.grey.shade600,
+          )),
+        ),
+      ),
+    ]);
+  }
+
   Widget _dpFont(String val, ValueChanged<String?> cb) => Column(
     crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('Font', style: TextStyle(fontSize: 10, color: Colors.grey)),
@@ -1200,7 +1423,9 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
               SingleChildScrollView(scrollDirection: Axis.horizontal,
                 child: Row(children: [
                   _dpFont(el.font, (v) => el.font = v ?? '3'),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 12),
+                  _boldBtn(el),
+                  const SizedBox(width: 12),
                   _numRow('XScale', el.xScale, (v) => el.xScale = v, mn: 1, mx: 10),
                   const SizedBox(width: 12),
                   _numRow('YScale', el.yScale, (v) => el.yScale = v, mn: 1, mx: 10),
@@ -1210,6 +1435,29 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
 
           ElType.weight || ElType.serial || ElType.dateTime => Column(
             crossAxisAlignment: CrossAxisAlignment.start, children: [
+              if (el.type == ElType.weight) ...[
+                const Text('Prints which weight:', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                const SizedBox(height: 4),
+                Row(children: [
+                  for (final wt in [(0, 'Net'), (1, 'Gross'), (2, 'Tare')])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: ChoiceChip(
+                        label: Text(wt.$2, style: const TextStyle(fontSize: 11)),
+                        selected: el.wtType == wt.$1,
+                        onSelected: (_) => setState(() {
+                          el.wtType = wt.$1;
+                          if (_suf.text.isEmpty) { _suf.text = ' g'; }
+                          _sync();
+                        }),
+                      ),
+                    ),
+                ]),
+                const SizedBox(height: 4),
+                const Text('Prefix can be any text — "G:", "Gross:", "भार:", etc.',
+                    style: TextStyle(fontSize: 10, color: Colors.grey)),
+                const SizedBox(height: 6),
+              ],
               Row(children: [
                 Expanded(child: _tf('Prefix', _pre, _preFn)),
                 const SizedBox(width: 8),
@@ -1219,7 +1467,9 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
               SingleChildScrollView(scrollDirection: Axis.horizontal,
                 child: Row(children: [
                   _dpFont(el.font, (v) => el.font = v ?? '3'),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 12),
+                  _boldBtn(el),
+                  const SizedBox(width: 12),
                   _numRow('XScale', el.xScale, (v) => el.xScale = v, mn: 1, mx: 10),
                   const SizedBox(width: 12),
                   _numRow('YScale', el.yScale, (v) => el.yScale = v, mn: 1, mx: 10),

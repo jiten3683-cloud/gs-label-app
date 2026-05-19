@@ -8,6 +8,7 @@ class LabelElement {
   String font;
   int xScale, yScale;
   int rotation;
+  bool bold;
 
   String data;
   String barcodeType;
@@ -30,11 +31,13 @@ class LabelElement {
   String suffix;
   int    decimals;
   String unit;
+  // 0 = net, 1 = gross, 2 = tare — explicit weight type, independent of prefix text
+  int    wtType;
 
   LabelElement({
     required this.type, this.x = 10, this.y = 10,
     this.text = '', this.font = '3', this.xScale = 1, this.yScale = 1,
-    this.rotation = 0,
+    this.rotation = 0, this.bold = false,
     this.data = '', this.barcodeType = '128', this.barcodeHeight = 60, this.barcodeWidth = 120,
     this.qrEcc = 'M', this.qrSize = 4,
     this.xEnd = 100, this.yEnd = 100, this.thickness = 2,
@@ -42,6 +45,7 @@ class LabelElement {
     this.logoPath = '', this.logoBmpHex = '', this.logoBmpW = 0,
     this.logoWidthDots = 80, this.logoHeightDots = 48,
     this.prefix = '', this.suffix = '', this.decimals = 3, this.unit = 'g',
+    this.wtType = 0,
   });
 
   Map<String, dynamic> toJson(LabelContext ctx) {
@@ -71,20 +75,29 @@ class LabelElement {
     switch (type) {
       case ElType.text:
         return {'type': 'text', 'x': x, 'y': y, 'font': font, 'rot': rotation,
-                'xs': xScale, 'ys': yScale,
+                'xs': xScale, 'ys': yScale, 'bold': bold,
                 'text': '$prefix${resolve(text)}$suffix'};
       case ElType.weight:
+        final String wtStr;
+        final String wtVar;
+        if (wtType == 1) {
+          wtStr = ctx.grossStr; wtVar = 'gross';
+        } else if (wtType == 2) {
+          wtStr = ctx.tareStr; wtVar = 'tare';
+        } else {
+          wtStr = ctx.netStr; wtVar = 'net';
+        }
         return {'type': 'text', 'x': x, 'y': y, 'font': font, 'rot': rotation,
-                'xs': xScale, 'ys': yScale,
-                'text': '$prefix${ctx.netStr}$suffix',
-                'wt_var': 'net', 'pre': prefix, 'suf': suffix};
+                'xs': xScale, 'ys': yScale, 'bold': bold,
+                'text': '$prefix$wtStr$suffix',
+                'wt_var': wtVar, 'pre': prefix, 'suf': suffix};
       case ElType.serial:
         return {'type': 'text', 'x': x, 'y': y, 'font': font, 'rot': rotation,
-                'xs': xScale, 'ys': yScale,
+                'xs': xScale, 'ys': yScale, 'bold': bold,
                 'text': '$prefix${ctx.serial}$suffix'};
       case ElType.dateTime:
         return {'type': 'text', 'x': x, 'y': y, 'font': font, 'rot': rotation,
-                'xs': xScale, 'ys': yScale,
+                'xs': xScale, 'ys': yScale, 'bold': bold,
                 'text': '${ctx.dateStr} ${ctx.timeStr}'};
       case ElType.qr:
         return {'type': 'qr', 'x': x, 'y': y, 'ecc': qrEcc, 'size': qrSize,

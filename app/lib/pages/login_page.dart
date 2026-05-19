@@ -18,6 +18,7 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   final _keyCtrl  = TextEditingController();
   final _wbCtrl   = TextEditingController();
+  final _codeCtrl = TextEditingController();
   bool  _loading      = false;
   bool  _verifying    = false; // true while doing startup license check
   bool  _networkError = false; // true when verify failed due to no internet
@@ -62,7 +63,7 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   @override void dispose() {
-    _keyCtrl.dispose(); _wbCtrl.dispose();
+    _keyCtrl.dispose(); _wbCtrl.dispose(); _codeCtrl.dispose();
     super.dispose();
   }
 
@@ -73,14 +74,21 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _activate() async {
-    final key = _keyCtrl.text.trim();
-    final wb  = _wbCtrl.text.trim();
+    final key  = _keyCtrl.text.trim();
+    final wb   = _wbCtrl.text.trim();
+    final code = _lic.isDeviceBound ? null : _codeCtrl.text.trim();
+
     if (key.isEmpty || wb.isEmpty) {
       setState(() => _error = 'License Key and WeighBridge ID are required');
       return;
     }
+    if (!_lic.isDeviceBound && (code == null || code.isEmpty)) {
+      setState(() => _error = 'Activation Code is required for new device');
+      return;
+    }
     setState(() { _loading = true; _error = ''; });
-    final err = await _lic.activate(licenseKey: key, weighBridgeId: wb);
+    final err = await _lic.activate(
+        licenseKey: key, weighBridgeId: wb, activationCode: code);
     if (!mounted) return;
     if (err == null) {
       _proceed();
@@ -239,6 +247,44 @@ class _LoginPageState extends State<LoginPage> {
                     _field(_wbCtrl, 'WeighBridge ID', Icons.scale_outlined,
                         hint: 'WB-XXXXX',
                         type: TextInputType.text),
+                    if (_lic.isDeviceBound) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.green.shade200),
+                        ),
+                        child: Row(children: [
+                          Icon(Icons.verified, size: 16, color: Colors.green.shade700),
+                          const SizedBox(width: 8),
+                          Flexible(child: Text(
+                              'Device already registered — no activation code needed',
+                              style: TextStyle(fontSize: 11, color: Colors.green.shade800))),
+                        ]),
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 12),
+                      _field(_codeCtrl, 'Activation Code', Icons.lock_outline,
+                          hint: 'XXXX-XXXX-XXXX-XXXX',
+                          inputFormatters: [
+                            TextInputFormatter.withFunction((old, nw) {
+                              var t = nw.text.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+                              if (t.length > 16) t = t.substring(0, 16);
+                              final buf = StringBuffer();
+                              for (int i = 0; i < t.length; i++) {
+                                if (i > 0 && i % 4 == 0) buf.write('-');
+                                buf.write(t[i]);
+                              }
+                              final s = buf.toString();
+                              return nw.copyWith(
+                                text: s,
+                                selection: TextSelection.collapsed(offset: s.length),
+                              );
+                            }),
+                          ]),
+                    ],
                     if (_error.isNotEmpty) ...[
                       const SizedBox(height: 10),
                       Container(
@@ -262,18 +308,35 @@ class _LoginPageState extends State<LoginPage> {
                           padding: const EdgeInsets.symmetric(vertical: 14)),
                     ),
                     const SizedBox(height: 8),
-                    // Device ID (for support)
+                    // Device ID — customer must share this with support to get activation code
+                    const SizedBox(height: 8),
                     InkWell(
                       onTap: _copyDeviceId,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                          Icon(Icons.perm_device_info, size: 13, color: Colors.grey.shade500),
-                          const SizedBox(width: 4),
-                          Text('Device ID: ${_lic.deviceId}',
-                              style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
-                          const SizedBox(width: 4),
-                          Icon(Icons.copy, size: 12, color: Colors.grey.shade400),
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.grey.shade300),
+                        ),
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('Your Device ID (tap to copy)',
+                              style: TextStyle(fontSize: 9, color: Colors.grey.shade600,
+                                  letterSpacing: 0.5)),
+                          const SizedBox(height: 2),
+                          Row(children: [
+                            Expanded(
+                              child: Text(_lic.deviceId,
+                                  style: const TextStyle(fontSize: 11,
+                                      fontFamily: 'monospace', fontWeight: FontWeight.bold),
+                                  overflow: TextOverflow.ellipsis),
+                            ),
+                            Icon(Icons.copy, size: 14, color: Colors.grey.shade500),
+                          ]),
+                          const SizedBox(height: 2),
+                          Text('Share this with JBC support to receive your Activation Code',
+                              style: TextStyle(fontSize: 9, color: Colors.grey.shade500)),
                         ]),
                       ),
                     ),
@@ -414,13 +477,12 @@ class _SupportFooter extends StatelessWidget {
       Text('Support', style: TextStyle(fontSize: 11,
           color: Colors.grey.shade500, fontWeight: FontWeight.bold)),
       const SizedBox(height: 4),
-      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Wrap(alignment: WrapAlignment.center, children: [
         TextButton.icon(
           onPressed: onCall,
           icon: const Icon(Icons.call, size: 14),
           label: const Text('+91 9828023683', style: TextStyle(fontSize: 12)),
         ),
-        const SizedBox(width: 8),
         TextButton.icon(
           onPressed: onEmail,
           icon: const Icon(Icons.email, size: 14),
