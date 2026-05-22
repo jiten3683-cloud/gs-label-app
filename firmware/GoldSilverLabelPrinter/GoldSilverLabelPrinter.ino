@@ -36,7 +36,8 @@
 // Printer TX = GPIO1 (UART0 / Serial) — same as original hardware
 
 #define PRINT_BTN_PIN  13    // Active-LOW print button (INPUT_PULLUP)
-#define LED_PIN         2    // Status LED
+#define LED_PIN        12    // BT status LED — HIGH=on, LOW=off (original JBCTAG BT_LED pin)
+#define PRINT_LED_PIN  14    // Print activity LED (original JBCTAG Pirtn_LED pin)
 
 #define SCALE_BAUD    9600
 #define PRINTER_BAUD  9600   // must match Serial.begin() below
@@ -84,8 +85,9 @@ unsigned long lastWeightPushMs = 0;
 const unsigned long WEIGHT_PUSH_MS = 200;   // 5 Hz
 
 // Button debounce
-unsigned long btnPressMs = 0;
-bool          btnArmed   = true;
+unsigned long btnPressMs   = 0;
+bool          btnArmed     = true;
+bool          btnLongFired = false;
 
 
 // ── Forward declarations ──────────────────────────────────────────────────────
@@ -405,7 +407,7 @@ void savePrintJobToNvs(const String& jsonStr) {
 //  Priority: RAM lastPrintJson → NVS stored job → hardcoded test print.
 // ============================================================================
 void buttonReprint() {
-  digitalWrite(LED_PIN, LOW); delay(80); digitalWrite(LED_PIN, HIGH);
+  digitalWrite(PRINT_LED_PIN, HIGH); delay(80); digitalWrite(PRINT_LED_PIN, LOW);
 
   String jobStr = lastPrintJson;
   if (jobStr.isEmpty()) {
@@ -492,15 +494,13 @@ class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer*) override {
     deviceConnected = true;
     bleBuffer = "";
-    digitalWrite(LED_PIN, HIGH);
+    digitalWrite(LED_PIN, HIGH);             // LED ON when connected
+    BLEDevice::getAdvertising()->stop();     // stop advertising while connected
   }
   void onDisconnect(BLEServer*) override {
     deviceConnected = false;
     bleBuffer       = "";
-    digitalWrite(LED_PIN, LOW);
-    // Defer startAdvertising() to loop() — calling it here (while the BLE stack
-    // is still tearing down the connection) causes it to silently fail, leaving
-    // the device invisible to other phones.
+    digitalWrite(LED_PIN, LOW);              // LED OFF when disconnected
     doStartAdv   = true;
     disconnectMs = millis();
   }
@@ -627,9 +627,11 @@ void pushWeightOverBLE() {
 //  Setup
 // ============================================================================
 void setup() {
-  pinMode(LED_PIN,      OUTPUT);
+  pinMode(LED_PIN,       OUTPUT);
+  pinMode(PRINT_LED_PIN, OUTPUT);
   pinMode(PRINT_BTN_PIN, INPUT_PULLUP);
-  digitalWrite(LED_PIN, LOW);
+  digitalWrite(LED_PIN,       LOW);   // off at boot
+  digitalWrite(PRINT_LED_PIN, LOW);   // off at boot
 
   // UART0 / Serial = printer at 9600 baud (GPIO1 TX → MAX3232 → TSC printer)
   // Same as original JBCTAG firmware.  Debug text also flows here; printer
@@ -662,20 +664,16 @@ void setup() {
 
   svc->start();
 
-  // BLE advertising — 31-byte limit per packet.
-  // Name "GS-LABEL-BRIDGE"=17 bytes + 128-bit UUID=18 bytes = 35 bytes → overflow.
-  // Fix: name in main ad packet, service UUID in scan response.
+  // BLE advertising — use addServiceUUID() so m_customAdvData stays false.
+  // This ensures start() always re-calls esp_ble_gap_config_adv_data() on
+  // every restart, which is required after a stop() or disconnect.
+  // setAdvertisementData() sets m_customAdvData=true and skips that step on
+  // subsequent start() calls — leaving an empty packet that phones cannot see.
   BLEAdvertising* adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(SERVICE_UUID);
+  adv->setScanResponse(true);
   adv->setMinPreferred(0x06);
   adv->setMaxPreferred(0x12);
-
-  BLEAdvertisementData advData;
-  advData.setName("GS-LABEL-BRIDGE");   // 17 bytes — fits in 31
-  adv->setAdvertisementData(advData);
-
-  BLEAdvertisementData scanData;
-  scanData.setCompleteServices(BLEUUID(SERVICE_UUID));  // 18 bytes in scan response
-  adv->setScanResponseData(scanData);
 
   BLEDevice::startAdvertising();
 
@@ -697,10 +695,16 @@ void setup() {
 //  Loop
 // ============================================================================
 void loop() {
-  // Re-start advertising 500 ms after disconnect so the BLE stack has fully
-  // released the previous connection before we try to accept a new one.
+  // Restart advertising 500 ms after disconnect.
   if (doStartAdv && (millis() - disconnectMs >= 500)) {
     doStartAdv = false;
+    BLEDevice::startAdvertising();
+  }
+
+  // Periodic retry every 5 s while disconnected — safety net for missed restarts.
+  static uint32_t lastAdvMs = 0;
+  if (!deviceConnected && !doStartAdv && (millis() - lastAdvMs >= 5000)) {
+    lastAdvMs = millis();
     BLEDevice::startAdvertising();
   }
 
@@ -714,14 +718,35 @@ void loop() {
     cmdBuffer = "";
   }
 
-  // Physical print button (GPIO13, active LOW) — reprints last app job
+  // Physical button (GPIO13, active LOW)
+  // Short press (< 3 s): reprint last label
+  // Long press  (≥ 3 s): force BLE restart + 3 LED blinks
   bool btnDown = (digitalRead(PRINT_BTN_PIN) == LOW);
-  if (btnDown && btnArmed && (millis() - btnPressMs > 300)) {
-    btnArmed   = false;
-    btnPressMs = millis();
-    buttonReprint();
+
+  if (btnDown && btnArmed) {
+    btnArmed     = false;
+    btnPressMs   = millis();
+    btnLongFired = false;
   }
-  if (!btnDown) btnArmed = true;
+
+  if (!btnArmed && !btnLongFired && (millis() - btnPressMs >= 2000)) {
+    btnLongFired    = true;
+    deviceConnected = false;
+    bleBuffer       = "";
+    // 3 blinks on BT LED (GPIO12)
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(LED_PIN, HIGH); delay(200);
+      digitalWrite(LED_PIN, LOW);  delay(200);
+    }
+    BLEDevice::startAdvertising();
+  }
+
+  if (!btnDown && !btnArmed) {
+    if (!btnLongFired && (millis() - btnPressMs >= 50)) {
+      buttonReprint();
+    }
+    btnArmed = true;
+  }
 
   delay(2);
 }
