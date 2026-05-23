@@ -95,7 +95,6 @@ class _ScalePageState extends State<ScalePage> {
   int    _printDirection  = 0;
   int    _topMarginMm     = 1;
   int    _leftMarginMm    = 0;
-  int    _rightMarginMm   = 0;
 
   // Company profile variables loaded from settings
   String _shopName        = '';
@@ -147,9 +146,8 @@ class _ScalePageState extends State<ScalePage> {
       final unit    = s['default_unit'] ?? 'g';
       _unit         = _unitFactors.containsKey(unit) ? unit : 'g';
       _printDirection  = int.tryParse(s['print_direction']    ?? '0') ?? 0;
-      _topMarginMm     = int.tryParse(s['print_top_margin_mm']   ?? '1') ?? 1;
-      _leftMarginMm    = int.tryParse(s['print_left_margin_mm']  ?? '0') ?? 0;
-      _rightMarginMm   = int.tryParse(s['print_right_margin_mm'] ?? '0') ?? 0;
+      _topMarginMm     = int.tryParse(s['print_top_margin_mm']  ?? '1') ?? 1;
+      _leftMarginMm    = int.tryParse(s['print_left_margin_mm'] ?? '0') ?? 0;
       _shopName        = s['shop_name']        ?? '';
       _companyName     = s['company_name']     ?? '';
       _companyAddress  = s['company_address']  ?? '';
@@ -401,10 +399,9 @@ class _ScalePageState extends State<ScalePage> {
     // Designer elements take priority — they support all types (QR, barcode, logo…)
     final elems = _buildFromElements(tplRow['json'] as String? ?? '[]', ctx);
     if (elems.isNotEmpty) {
-      // Apply top/left margin offsets; right margin reduces the clamping boundary
-      final topDots   = _topMarginMm  * 8;
-      final leftDots  = _leftMarginMm * 8;
-      final rightDots = _rightMarginMm * 8;
+      // Apply top and left margin offsets to all designer elements
+      final topDots  = _topMarginMm  * 8;
+      final leftDots = _leftMarginMm * 8;
       final shifted = (topDots > 0 || leftDots > 0)
           ? elems.map((e) {
               final c = Map<String, dynamic>.from(e);
@@ -413,16 +410,14 @@ class _ScalePageState extends State<ScalePage> {
               return c;
             }).toList()
           : elems;
-      final effectiveWDots = ((wMm * 8) - rightDots).clamp(8, wMm * 8);
-      var clamped = _clampToLabel(shifted, effectiveWDots, hMm * 8);
+      var clamped = _clampToLabel(shifted, wMm * 8, hMm * 8);
       // For small labels, prevent content being stuck at bottom due to _add() clamping.
       if (hMm <= 15) clamped = _normalizeTop(clamped, hMm * 8);
       return clamped;
     }
     // Fall back to line-based text when no designer elements exist
     final lines = DbService.parseLines(tplRow);
-    final effectiveWMm = (wMm - _rightMarginMm).clamp(1, wMm);
-    return _buildFromLines(lines, ctx, effectiveWMm, hMm, _topMarginMm, _leftMarginMm);
+    return _buildFromLines(lines, ctx, wMm, hMm, _topMarginMm, _leftMarginMm);
   }
 
   // ── Runtime preview ──────────────────────────────────────────────────────────
@@ -431,6 +426,11 @@ class _ScalePageState extends State<ScalePage> {
     final db     = context.read<DbService>();
     final tplRow = await db.getTemplate(_templateId!);
     if (tplRow == null || !mounted) return;
+
+    // Refresh margins from DB in case Settings were changed this session
+    final ms = await db.getAllSettings();
+    _topMarginMm  = int.tryParse(ms['print_top_margin_mm']  ?? '1') ?? 1;
+    _leftMarginMm = int.tryParse(ms['print_left_margin_mm'] ?? '0') ?? 0;
 
     final ctx      = _buildCtx('PREVIEW');
     final elements = _resolveTemplate(tplRow, ctx);
@@ -458,6 +458,11 @@ class _ScalePageState extends State<ScalePage> {
 
     final tplRow = await db.getTemplate(_templateId!);
     if (tplRow == null) { _toast('Template not found'); return; }
+
+    // Refresh margins from DB in case Settings were changed this session
+    final ms       = await db.getAllSettings();
+    _topMarginMm   = int.tryParse(ms['print_top_margin_mm']  ?? '1') ?? 1;
+    _leftMarginMm  = int.tryParse(ms['print_left_margin_mm'] ?? '0') ?? 0;
 
     final prefix   = await db.getSetting('serial_prefix', def: 'GS-');
     final suffix   = await db.getSetting('serial_suffix', def: '');

@@ -26,7 +26,6 @@ class _SettingsPageState extends State<SettingsPage> {
   final _darknessCtrl     = TextEditingController(text: '8');
   final _topMarginCtrl    = TextEditingController(text: '1');
   final _leftMarginCtrl   = TextEditingController(text: '0');
-  final _rightMarginCtrl  = TextEditingController(text: '0');
   final _bleNameCtrl      = TextEditingController(text: 'GS-LABEL-BRIDGE');
   String _defaultUnit     = 'g';
   int    _printDirection  = 0;   // 0 = Normal, 1 = Rotated 180°
@@ -42,7 +41,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _serialPrefixCtrl.dispose(); _serialSuffixCtrl.dispose();
     _serialPadCtrl.dispose(); _serialStartCtrl.dispose();
     _gapCtrl.dispose(); _darknessCtrl.dispose();
-    _topMarginCtrl.dispose(); _leftMarginCtrl.dispose(); _rightMarginCtrl.dispose();
+    _topMarginCtrl.dispose(); _leftMarginCtrl.dispose();
     _bleNameCtrl.dispose();
     super.dispose();
   }
@@ -62,10 +61,9 @@ class _SettingsPageState extends State<SettingsPage> {
     _serialResetMode       = s['serial_reset_mode'] ?? 'manual';
     _gapCtrl.text          = s['default_gap']      ?? '3';
     _darknessCtrl.text     = s['default_darkness']     ?? '8';
-    _topMarginCtrl.text    = s['print_top_margin_mm']   ?? '1';
-    _leftMarginCtrl.text   = s['print_left_margin_mm']  ?? '0';
-    _rightMarginCtrl.text  = s['print_right_margin_mm'] ?? '0';
-    _bleNameCtrl.text      = s['ble_device_name']        ?? 'GS-LABEL-BRIDGE';
+    _topMarginCtrl.text    = s['print_top_margin_mm']  ?? '1';
+    _leftMarginCtrl.text   = s['print_left_margin_mm'] ?? '0';
+    _bleNameCtrl.text      = s['ble_device_name']      ?? 'GS-LABEL-BRIDGE';
     _defaultUnit           = s['default_unit']     ?? 'g';
     _printDirection        = int.tryParse(s['print_direction'] ?? '0') ?? 0;
     if (!_units.contains(_defaultUnit)) _defaultUnit = 'g';
@@ -119,10 +117,9 @@ class _SettingsPageState extends State<SettingsPage> {
       'serial_reset_mode': _serialResetMode,
       'default_gap':     _gapCtrl.text,
       'default_darkness':    _darknessCtrl.text,
-      'print_top_margin_mm':   _topMarginCtrl.text,
-      'print_left_margin_mm':  _leftMarginCtrl.text,
-      'print_right_margin_mm': _rightMarginCtrl.text,
-      'ble_device_name':       _bleNameCtrl.text,
+      'print_top_margin_mm':  _topMarginCtrl.text,
+      'print_left_margin_mm': _leftMarginCtrl.text,
+      'ble_device_name':      _bleNameCtrl.text,
       'default_unit':    _defaultUnit,
       'print_direction': _printDirection.toString(),
     };
@@ -205,20 +202,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 ]),
                 const SizedBox(height: 12),
                 Row(children: [
-                  Expanded(child: _field(_topMarginCtrl, 'Top Margin',
-                      Icons.vertical_align_top, type: TextInputType.number)),
-                  const SizedBox(width: 8),
-                  Expanded(child: _field(_leftMarginCtrl, 'Left Margin',
-                      Icons.border_left, type: TextInputType.number)),
-                  const SizedBox(width: 8),
-                  Expanded(child: _field(_rightMarginCtrl, 'Right Margin',
-                      Icons.border_right, type: TextInputType.number)),
+                  Expanded(child: _field(_topMarginCtrl, 'Top Margin (mm)',
+                      Icons.vertical_align_top, type: TextInputType.number,
+                      hint: 'Shift content down from top edge')),
+                  const SizedBox(width: 12),
+                  Expanded(child: _field(_leftMarginCtrl, 'Left Margin (mm)',
+                      Icons.border_left, type: TextInputType.number,
+                      hint: 'Shift content right from left edge')),
                 ]),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12, top: 0),
-                  child: Text('Margins in mm — shift designer label content away from each edge',
-                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-                ),
                 DropdownButtonFormField<int>(
                   value: _printDirection,
                   decoration: const InputDecoration(
@@ -372,6 +363,15 @@ class _SettingsPageState extends State<SettingsPage> {
                 icon: const Icon(Icons.save),
                 label: const Text('Save Settings'),
                 style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
+              ),
+              const SizedBox(height: 16),
+
+              // ── App Version ─────────────────────────────────────────────────
+              Center(
+                child: Text(
+                  'GS Label Printer  v1.0.2 (build 4)',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                ),
               ),
               const SizedBox(height: 24),
             ]),
