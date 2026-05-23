@@ -24,6 +24,9 @@ class _SettingsPageState extends State<SettingsPage> {
   String _serialResetMode = 'manual';
   final _gapCtrl          = TextEditingController(text: '3');
   final _darknessCtrl     = TextEditingController(text: '8');
+  final _topMarginCtrl    = TextEditingController(text: '1');
+  final _leftMarginCtrl   = TextEditingController(text: '0');
+  final _rightMarginCtrl  = TextEditingController(text: '0');
   final _bleNameCtrl      = TextEditingController(text: 'GS-LABEL-BRIDGE');
   String _defaultUnit     = 'g';
   int    _printDirection  = 0;   // 0 = Normal, 1 = Rotated 180°
@@ -38,7 +41,9 @@ class _SettingsPageState extends State<SettingsPage> {
     _gstCtrl.dispose(); _addressCtrl.dispose(); _phoneCtrl.dispose();
     _serialPrefixCtrl.dispose(); _serialSuffixCtrl.dispose();
     _serialPadCtrl.dispose(); _serialStartCtrl.dispose();
-    _gapCtrl.dispose(); _darknessCtrl.dispose(); _bleNameCtrl.dispose();
+    _gapCtrl.dispose(); _darknessCtrl.dispose();
+    _topMarginCtrl.dispose(); _leftMarginCtrl.dispose(); _rightMarginCtrl.dispose();
+    _bleNameCtrl.dispose();
     super.dispose();
   }
 
@@ -56,8 +61,11 @@ class _SettingsPageState extends State<SettingsPage> {
     _serialStartCtrl.text  = s['serial_start']     ?? '1';
     _serialResetMode       = s['serial_reset_mode'] ?? 'manual';
     _gapCtrl.text          = s['default_gap']      ?? '3';
-    _darknessCtrl.text     = s['default_darkness'] ?? '8';
-    _bleNameCtrl.text      = s['ble_device_name']  ?? 'GS-LABEL-BRIDGE';
+    _darknessCtrl.text     = s['default_darkness']     ?? '8';
+    _topMarginCtrl.text    = s['print_top_margin_mm']   ?? '1';
+    _leftMarginCtrl.text   = s['print_left_margin_mm']  ?? '0';
+    _rightMarginCtrl.text  = s['print_right_margin_mm'] ?? '0';
+    _bleNameCtrl.text      = s['ble_device_name']        ?? 'GS-LABEL-BRIDGE';
     _defaultUnit           = s['default_unit']     ?? 'g';
     _printDirection        = int.tryParse(s['print_direction'] ?? '0') ?? 0;
     if (!_units.contains(_defaultUnit)) _defaultUnit = 'g';
@@ -110,8 +118,11 @@ class _SettingsPageState extends State<SettingsPage> {
       'serial_start':     _serialStartCtrl.text,
       'serial_reset_mode': _serialResetMode,
       'default_gap':     _gapCtrl.text,
-      'default_darkness':_darknessCtrl.text,
-      'ble_device_name': _bleNameCtrl.text,
+      'default_darkness':    _darknessCtrl.text,
+      'print_top_margin_mm':   _topMarginCtrl.text,
+      'print_left_margin_mm':  _leftMarginCtrl.text,
+      'print_right_margin_mm': _rightMarginCtrl.text,
+      'ble_device_name':       _bleNameCtrl.text,
       'default_unit':    _defaultUnit,
       'print_direction': _printDirection.toString(),
     };
@@ -193,6 +204,21 @@ class _SettingsPageState extends State<SettingsPage> {
                       Icons.brightness_6, type: TextInputType.number)),
                 ]),
                 const SizedBox(height: 12),
+                Row(children: [
+                  Expanded(child: _field(_topMarginCtrl, 'Top Margin',
+                      Icons.vertical_align_top, type: TextInputType.number)),
+                  const SizedBox(width: 8),
+                  Expanded(child: _field(_leftMarginCtrl, 'Left Margin',
+                      Icons.border_left, type: TextInputType.number)),
+                  const SizedBox(width: 8),
+                  Expanded(child: _field(_rightMarginCtrl, 'Right Margin',
+                      Icons.border_right, type: TextInputType.number)),
+                ]),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12, top: 0),
+                  child: Text('Margins in mm — shift designer label content away from each edge',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                ),
                 DropdownButtonFormField<int>(
                   value: _printDirection,
                   decoration: const InputDecoration(

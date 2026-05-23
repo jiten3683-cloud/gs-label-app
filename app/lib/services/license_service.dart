@@ -6,6 +6,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ── Encrypted storage keys (all written to Android Keystore / iOS Keychain) ──
 const _kInstallDate   = 'gs_install_dt';
@@ -20,6 +21,11 @@ const _kApkSig        = 'gs_apk_sig';     // SHA-256 of APK signing certificate
 const _kExpiry        = 'gs_expiry';
 
 const _trialDays = 3;
+
+// Plain SharedPreferences keys — not encrypted, survives updates & Google Backup.
+// Used to recover credentials after reinstall when Keystore key is lost.
+const _kBakLicKey = 'gs_bak_lic';
+const _kBakWbId   = 'gs_bak_wb';
 
 // Salts embedded in compiled code — R8 encrypts these strings in release builds.
 const _kHmacSalt    = r'GS$L@b3l#2024!JBC^Pr1nt3r*S3cur3Key';
@@ -84,35 +90,54 @@ class LicenseService {
     _fingerprint = await _buildFingerprint();
 
     // 2. Ensure install date is persisted (encrypted)
-    _installDate = await _storage.read(key: _kInstallDate) ?? '';
-    if (_installDate.isEmpty) {
-      _installDate = DateTime.now().toIso8601String();
-      await _storage.write(key: _kInstallDate, value: _installDate);
+    // Wrap all secure reads — Keystore key may be gone after uninstall/restore.
+    String storedAct = 'false';
+    String storedFp  = '';
+    String storedCs  = '';
+    String storedTs  = '';
+    String storedSig = '';
+    try {
+      _installDate = await _storage.read(key: _kInstallDate) ?? '';
+      if (_installDate.isEmpty) {
+        _installDate = DateTime.now().toIso8601String();
+        await _storage.write(key: _kInstallDate, value: _installDate);
+      }
+      storedAct      = await _storage.read(key: _kActivated)     ?? 'false';
+      _licenseKey    = await _storage.read(key: _kLicenseKey)     ?? '';
+      _weighBridgeId = await _storage.read(key: _kWeighBridgeId)  ?? '';
+      _storedActCode = await _storage.read(key: _kActCode)        ?? '';
+      storedFp       = await _storage.read(key: _kBoundFp)        ?? '';
+      storedCs       = await _storage.read(key: _kChecksum)       ?? '';
+      storedTs       = await _storage.read(key: _kLicenseTs)      ?? '';
+      storedSig      = await _storage.read(key: _kApkSig)         ?? '';
+    } catch (_) {
+      // Keystore key lost (uninstall/restore) — treat as fresh install
+      storedAct = 'false';
     }
 
-    // 3. Read persisted license state
-    final storedAct = await _storage.read(key: _kActivated) ?? 'false';
-    _licenseKey    = await _storage.read(key: _kLicenseKey)    ?? '';
-    _weighBridgeId = await _storage.read(key: _kWeighBridgeId) ?? '';
-    _storedActCode = await _storage.read(key: _kActCode)       ?? '';
+    // Ensure install date has a fallback
+    if (_installDate.isEmpty) {
+      _installDate = DateTime.now().toIso8601String();
+    }
 
-    // 4. Device binding — fingerprint must match what was stored at activation
-    final storedFp = await _storage.read(key: _kBoundFp) ?? '';
-
-    // Mark device as bound if it previously completed activation code verification
+    // 3. Device binding
     if (_storedActCode.isNotEmpty && storedFp == _fingerprint) {
       _deviceBound = true;
     }
 
-    if (storedAct != 'true') { _activated = false; return; }
+    if (storedAct != 'true') {
+      // Secure storage is clear — attempt silent recovery via SharedPreferences backup
+      await _tryRecoverFromBackup();
+      return;
+    }
+
+    // 4. Fingerprint binding
     if (storedFp.isNotEmpty && storedFp != _fingerprint) {
       await _revokeActivation(reason: 'device mismatch');
       return;
     }
 
-    // 5. HMAC checksum — detects manual editing of encrypted storage
-    final storedCs = await _storage.read(key: _kChecksum) ?? '';
-    final storedTs = await _storage.read(key: _kLicenseTs) ?? '';
+    // 5. HMAC checksum
     if (_licenseKey.isNotEmpty && storedCs.isNotEmpty) {
       final expected = _computeHmac(_licenseKey, _weighBridgeId, _fingerprint, storedTs);
       if (storedCs != expected) {
@@ -122,7 +147,6 @@ class LicenseService {
     }
 
     // 6. APK signature — detects repackaged / tampered APK
-    final storedSig  = await _storage.read(key: _kApkSig) ?? '';
     final currentSig = await _getApkSignature();
     if (storedSig.isNotEmpty && currentSig.isNotEmpty && currentSig != storedSig) {
       await _revokeActivation(reason: 'APK signature mismatch');
@@ -130,6 +154,54 @@ class LicenseService {
     }
 
     _activated = true;
+  }
+
+  // ── Silent recovery via SharedPreferences backup ─────────────────────────────
+  // Called when secure storage is empty (e.g. after uninstall+reinstall, or after
+  // Keystore key is lost on a Google Backup restore to a new device).
+  // Uses licenseKey + weighBridgeId backed up in plain SharedPreferences, then
+  // re-validates with the server. No activation code needed — server is the authority.
+  Future<void> _tryRecoverFromBackup() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final bakKey = prefs.getString(_kBakLicKey) ?? '';
+      final bakWb  = prefs.getString(_kBakWbId)   ?? '';
+      if (bakKey.isEmpty || bakWb.isEmpty) return;
+
+      // Pre-fill in-memory so the login screen shows previous credentials
+      _licenseKey    = bakKey;
+      _weighBridgeId = bakWb;
+
+      final resp = await http.post(
+        Uri.parse(_apiUrl),
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: {
+          'tag': 'checkLicense', 'licenseKey': bakKey,
+          'weighBridgeId': bakWb, 'mac_add': _fingerprint,
+        },
+      ).timeout(const Duration(seconds: 10));
+
+      if (resp.statusCode != 200) return;
+      Map<String, dynamic>? json;
+      try { json = jsonDecode(resp.body.trim()) as Map<String, dynamic>; } catch (_) {}
+      if (!_parseSuccess(json, resp.body.trim())) return;
+
+      // Server validated — restore full activation state
+      final ts  = DateTime.now().toIso8601String();
+      final cs  = _computeHmac(bakKey, bakWb, _fingerprint, ts);
+      final sig = await _getApkSignature();
+      await _storage.write(key: _kActivated,     value: 'true');
+      await _storage.write(key: _kLicenseKey,    value: bakKey);
+      await _storage.write(key: _kWeighBridgeId, value: bakWb);
+      await _storage.write(key: _kBoundFp,       value: _fingerprint);
+      await _storage.write(key: _kChecksum,      value: cs);
+      await _storage.write(key: _kLicenseTs,     value: ts);
+      if (sig.isNotEmpty) await _storage.write(key: _kApkSig, value: sig);
+      _activated   = true;
+      _deviceBound = true;
+    } catch (_) {
+      // Network unavailable — leave _activated = false, user can activate manually
+    }
   }
 
   // ── Root detection ────────────────────────────────────────────────────────────
@@ -233,6 +305,12 @@ class LicenseService {
         await _storage.write(key: _kChecksum,     value: cs);
         await _storage.write(key: _kLicenseTs,    value: ts);
         if (sig.isNotEmpty) await _storage.write(key: _kApkSig, value: sig);
+
+        // Plain SharedPreferences backup — survives updates and Google Backup restore.
+        // Used by _tryRecoverFromBackup() if Keystore key is ever lost.
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_kBakLicKey, licenseKey);
+        await prefs.setString(_kBakWbId,   weighBridgeId);
 
         final login  = json?['login'] as Map<String, dynamic>?;
         final expiry = (login?['expired_on'] ?? '').toString();

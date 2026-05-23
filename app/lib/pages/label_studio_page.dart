@@ -1271,6 +1271,10 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
     _suf  = TextEditingController(text: el.suffix);
     _data = TextEditingController(text: el.data);
 
+    // _sync() must fire on programmatic controller updates too (e.g. when
+    // _insertVar sets c.value directly — onChanged only fires for user input).
+    for (final c in [_text, _pre, _suf, _data]) c.addListener(_sync);
+
     void reg(FocusNode fn, TextEditingController c) =>
         fn.addListener(() { if (fn.hasFocus) widget.onFocusCtrl(c); });
 
@@ -1281,6 +1285,7 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
   }
 
   @override void dispose() {
+    for (final c in [_text, _pre, _suf, _data]) c.removeListener(_sync);
     for (final c in [_text, _pre, _suf, _data]) c.dispose();
     for (final f in [_textFn, _preFn, _sufFn, _dataFn]) f.dispose();
     widget.onFocusCtrl(null);
@@ -1297,7 +1302,7 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
 
   Widget _tf(String label, TextEditingController c, FocusNode fn, {String hint = ''}) =>
       TextField(
-        controller: c, focusNode: fn, onChanged: (_) => _sync(),
+        controller: c, focusNode: fn,
         style: const TextStyle(fontSize: 13),
         decoration: InputDecoration(
           labelText: label, hintText: hint, isDense: true,

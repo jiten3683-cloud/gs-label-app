@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -137,6 +138,8 @@ class DbService {
 
   Future<void> seedDefaultTemplates() async {
     if ((await _db.query('templates', limit: 1)).isNotEmpty) return;
+    // Try restoring from auto-backup before creating the factory default
+    if (await restoreTemplatesFromBackup()) return;
     await saveTemplate(
       name: 'Gold/Silver Tag (50×25)', wMm: 50, hMm: 25, gapMm: 3, json: [],
       lines: ['{product}  {purity}', 'G:{gross}  N:{net}', 'T:{tare}  {date}', 'SN:{serial}'],
@@ -167,14 +170,78 @@ class DbService {
       'updated': DateTime.now().millisecondsSinceEpoch,
     };
     if (lines != null) row['lines'] = jsonEncode(lines);
+    int savedId;
     if (id == null) {
-      final newId = await _db.insert('templates', row);
-      templateVersion.value++;
-      return newId;
+      savedId = await _db.insert('templates', row);
+    } else {
+      await _db.update('templates', row, where: 'id=?', whereArgs: [id]);
+      savedId = id;
     }
-    await _db.update('templates', row, where: 'id=?', whereArgs: [id]);
     templateVersion.value++;
-    return id;
+    _writeTemplateBackup();   // fire-and-forget
+    return savedId;
+  }
+
+  // Write all templates to a JSON backup file in app documents directory.
+  // Runs silently after every save — does not block or throw.
+  void _writeTemplateBackup() {
+    Future(() async {
+      try {
+        final rows = await _db.query('templates', orderBy: 'updated DESC');
+        final payload = jsonEncode({
+          'format': 'jbc-gs-template',
+          'version': 1,
+          'backed_up': DateTime.now().toIso8601String(),
+          'templates': rows.map((r) {
+            dynamic jsonData;
+            try { jsonData = jsonDecode(r['json'] as String? ?? '[]'); } catch (_) { jsonData = []; }
+            dynamic linesData;
+            try { linesData = jsonDecode(r['lines'] as String? ?? '[]'); } catch (_) { linesData = []; }
+            return {
+              'name':      r['name'],
+              'width_mm':  r['width_mm'],
+              'height_mm': r['height_mm'],
+              'gap_mm':    r['gap_mm'] ?? 3,
+              'json':      jsonData,
+              'lines':     linesData,
+            };
+          }).toList(),
+        });
+        final dir  = await getApplicationDocumentsDirectory();
+        final file = File(p.join(dir.path, 'templates_backup.json'));
+        await file.writeAsString(payload);
+      } catch (_) {}
+    });
+  }
+
+  // Restore templates from the auto-backup file if the templates table is empty.
+  // Called once on startup after seedDefaultTemplates() finds nothing.
+  Future<bool> restoreTemplatesFromBackup() async {
+    try {
+      final dir  = await getApplicationDocumentsDirectory();
+      final file = File(p.join(dir.path, 'templates_backup.json'));
+      if (!await file.exists()) return false;
+      final data = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      if (data['format'] != 'jbc-gs-template') return false;
+      final list = (data['templates'] as List).cast<Map<String, dynamic>>();
+      if (list.isEmpty) return false;
+      for (final t in list) {
+        final linesRaw = t['lines'];
+        List<String>? lines;
+        if (linesRaw is List) lines = linesRaw.map((e) => e.toString()).toList();
+        await saveTemplate(
+          name:  t['name']      as String? ?? 'Restored Template',
+          wMm:   (t['width_mm']  as num?)?.toInt() ?? 50,
+          hMm:   (t['height_mm'] as num?)?.toInt() ?? 25,
+          gapMm: (t['gap_mm']    as num?)?.toInt() ?? 3,
+          json:  t['json'] ?? [],
+          lines: lines,
+        );
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> saveTemplateLines(int id, List<String> lines) async {

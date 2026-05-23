@@ -93,6 +93,9 @@ class _ScalePageState extends State<ScalePage> {
   List<Map<String, dynamic>> _templates = [];
   int    _queueCount      = 0;
   int    _printDirection  = 0;
+  int    _topMarginMm     = 1;
+  int    _leftMarginMm    = 0;
+  int    _rightMarginMm   = 0;
 
   // Company profile variables loaded from settings
   String _shopName        = '';
@@ -143,7 +146,10 @@ class _ScalePageState extends State<ScalePage> {
     setState(() {
       final unit    = s['default_unit'] ?? 'g';
       _unit         = _unitFactors.containsKey(unit) ? unit : 'g';
-      _printDirection  = int.tryParse(s['print_direction'] ?? '0') ?? 0;
+      _printDirection  = int.tryParse(s['print_direction']    ?? '0') ?? 0;
+      _topMarginMm     = int.tryParse(s['print_top_margin_mm']   ?? '1') ?? 1;
+      _leftMarginMm    = int.tryParse(s['print_left_margin_mm']  ?? '0') ?? 0;
+      _rightMarginMm   = int.tryParse(s['print_right_margin_mm'] ?? '0') ?? 0;
       _shopName        = s['shop_name']        ?? '';
       _companyName     = s['company_name']     ?? '';
       _companyAddress  = s['company_address']  ?? '';
@@ -259,7 +265,8 @@ class _ScalePageState extends State<ScalePage> {
 
   // ── Resolve template lines → TSPL elements ───────────────────────────────────
   List<Map<String, dynamic>> _buildFromLines(
-      List<String> lines, LabelContext ctx, int wMm, [int hMm = 25]) {
+      List<String> lines, LabelContext ctx, int wMm,
+      [int hMm = 25, int topMarginMm = 0, int leftMarginMm = 0]) {
     final elems = <Map<String, dynamic>>[];
     final hDots = hMm * 8;
     // Small labels (≤15 mm tall): font-2 (20 dots) with tight 20-dot step packs
@@ -268,11 +275,13 @@ class _ScalePageState extends State<ScalePage> {
     final String font = small ? '2' : '3';
     final int fontH   = small ? 20 : 24;
     final int step    = small ? 20 : 32;
-    int y = small ? 0 : 8;
+    final int topDots  = topMarginMm  * 8;
+    final int leftDots = leftMarginMm * 8;
+    int y = small ? topDots : (topDots + 8);
     for (final raw in lines) {
       if (y + fontH > hDots) break;
       if (raw.trim().isEmpty) { y += step ~/ 2; continue; }
-      elems.add({'type': 'text', 'x': 8, 'y': y, 'font': font,
+      elems.add({'type': 'text', 'x': 8 + leftDots, 'y': y, 'font': font,
           'xs': 1, 'ys': 1, 'rot': 0,
           'text': _resolveCtx(_expandDots(raw, wMm), ctx)});
       y += step;
@@ -392,14 +401,28 @@ class _ScalePageState extends State<ScalePage> {
     // Designer elements take priority — they support all types (QR, barcode, logo…)
     final elems = _buildFromElements(tplRow['json'] as String? ?? '[]', ctx);
     if (elems.isNotEmpty) {
-      var clamped = _clampToLabel(elems, wMm * 8, hMm * 8);
+      // Apply top/left margin offsets; right margin reduces the clamping boundary
+      final topDots   = _topMarginMm  * 8;
+      final leftDots  = _leftMarginMm * 8;
+      final rightDots = _rightMarginMm * 8;
+      final shifted = (topDots > 0 || leftDots > 0)
+          ? elems.map((e) {
+              final c = Map<String, dynamic>.from(e);
+              if (topDots  > 0) c['y'] = (e['y'] as num? ?? 0).toInt() + topDots;
+              if (leftDots > 0) c['x'] = (e['x'] as num? ?? 0).toInt() + leftDots;
+              return c;
+            }).toList()
+          : elems;
+      final effectiveWDots = ((wMm * 8) - rightDots).clamp(8, wMm * 8);
+      var clamped = _clampToLabel(shifted, effectiveWDots, hMm * 8);
       // For small labels, prevent content being stuck at bottom due to _add() clamping.
       if (hMm <= 15) clamped = _normalizeTop(clamped, hMm * 8);
       return clamped;
     }
     // Fall back to line-based text when no designer elements exist
     final lines = DbService.parseLines(tplRow);
-    return _buildFromLines(lines, ctx, wMm, hMm);
+    final effectiveWMm = (wMm - _rightMarginMm).clamp(1, wMm);
+    return _buildFromLines(lines, ctx, effectiveWMm, hMm, _topMarginMm, _leftMarginMm);
   }
 
   // ── Runtime preview ──────────────────────────────────────────────────────────
