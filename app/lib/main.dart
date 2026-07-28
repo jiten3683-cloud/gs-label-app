@@ -1,4 +1,7 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemChrome, SystemUiMode;
 import 'package:provider/provider.dart';
 
 import 'services/ble_service.dart';
@@ -10,6 +13,7 @@ import 'pages/login_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
   final db      = DbService();
   final theme   = ThemeService();
@@ -20,6 +24,12 @@ void main() async {
     license.init(),
   ]);
   await theme.load(db);
+  unawaited(db.ensureBuiltinTemplates());
+  // Migrate default print direction from 0 → 1 (180°) for existing installs
+  final storedDir = await db.getSetting('print_direction', def: '');
+  if (storedDir.isEmpty || storedDir == '0') {
+    await db.setSetting('print_direction', '1');
+  }
 
   runApp(
     MultiProvider(
