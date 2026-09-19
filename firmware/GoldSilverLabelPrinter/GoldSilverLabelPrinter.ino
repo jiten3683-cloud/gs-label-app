@@ -72,13 +72,23 @@ String        cmdBuffer = "";
 String lastPrintJson = "";
 
 // Scale state
-struct WeightReading { float grams = 0; bool stable = false; uint32_t tsMs = 0; };
+// `value` is the number EXACTLY as the scale sent it — never unit-converted.
+// `unit` is the unit token read off the same line ("g", "kg", "ct", …); empty if
+// the scale sends none. `decimals` is how many digits followed the decimal point
+// in the raw string, so the reprint reproduces the scale's own precision.
+struct WeightReading {
+  float    value    = 0;
+  char     unit[6]  = "";
+  uint8_t  decimals = 3;
+  bool     stable   = false;
+  uint32_t tsMs     = 0;
+};
 WeightReading latest;
-float    tareGrams   = 0.0f;
+float    tareGrams   = 0.0f;   // tare snapshot, in the same raw unit as latest.value
 char     scaleBuf[64];
 uint8_t  scaleIdx    = 0;
 bool     scaleInPkt  = false;   // true while inside a *…# packet
-float    prevGrams   = -9999.0f;
+float    prevValue   = -9999.0f;
 uint32_t stableMs    = 0;       // millis() when weight last changed
 
 unsigned long lastWeightPushMs = 0;
@@ -101,7 +111,9 @@ void _sendOrientationTest(uint8_t dir);
 // ============================================================================
 inline void tspl(const char* s) { Serial.print(s); }
 
-// Track last printed label size to detect size changes and re-calibrate gap sensor.
+// Label size the gap sensor was last calibrated for. Persisted in NVS ("calW"/"calH")
+// and restored in setup() — if this lived only in RAM, the first print after every
+// power-on would re-run GAPDETECT and feed out several blank labels.
 static uint16_t lastLabelW = 0, lastLabelH = 0;
 
 void tsplBegin(uint16_t w, uint16_t h, uint8_t gap = 3,
@@ -121,6 +133,8 @@ void tsplBegin(uint16_t w, uint16_t h, uint8_t gap = 3,
     delay(h <= 15 ? 6000 : 4000);
     lastLabelW = w;
     lastLabelH = h;
+    prefs.putUShort("calW", w);
+    prefs.putUShort("calH", h);
   }
   Serial.printf("SIZE %d mm,%d mm\r\n", w, h);
   Serial.printf("GAP %d mm,0\r\n", gap);
@@ -178,6 +192,14 @@ void notifyStatus(const String& code, const String& msg) {
 
 // Font character heights in dots at 203 DPI — mirrors app kFontDotH
 static const uint8_t kFontH[9] = {0, 12, 20, 24, 32, 48, 19, 27, 21};
+
+// Reverse all 8 bits in a byte — used for 180° logo rotation
+static inline uint8_t reverseByte(uint8_t b) {
+  b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+  b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+  b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+  return b;
+}
 
 // ============================================================================
 //  Print job executor
@@ -273,12 +295,42 @@ void executePrintJob(JsonDocument& doc) {
       }
       const char* bmpHex = e["bmp"] | "";
       if (strlen(bmpHex) > 0 && bw > 0 && bh > 0) {
-        Serial.printf("BITMAP %d,%d,%d,%d,0,", x, y, bw, bh);
-        for (int i = 0; bmpHex[i] != '\0' && bmpHex[i+1] != '\0'; i += 2) {
-          char nibbles[3] = { bmpHex[i], bmpHex[i+1], '\0' };
-          Serial.write((uint8_t)strtol(nibbles, nullptr, 16));
+        int totalBytes = bw * bh;
+        if (dir == 1) {
+          // 180° rotation: buffer decoded bytes, send rows in reverse with bit-reversed bytes
+          uint8_t* buf = (uint8_t*)malloc(totalBytes);
+          if (buf) {
+            const char* p = bmpHex;
+            for (int i = 0; i < totalBytes && p[0] != '\0' && p[1] != '\0'; i++, p += 2) {
+              char nb[3] = { p[0], p[1], '\0' };
+              buf[i] = (uint8_t)strtol(nb, nullptr, 16);
+            }
+            Serial.printf("BITMAP %d,%d,%d,%d,0,", x, y, bw, bh);
+            for (int row = bh - 1; row >= 0; row--) {
+              for (int col = bw - 1; col >= 0; col--) {
+                Serial.write(reverseByte(buf[row * bw + col]));
+              }
+            }
+            Serial.print("\r\n");
+            free(buf);
+          } else {
+            // malloc failed — send without row/col reversal but still fix bit order
+            Serial.printf("BITMAP %d,%d,%d,%d,0,", x, y, bw, bh);
+            for (int i = 0; bmpHex[i] != '\0' && bmpHex[i+1] != '\0'; i += 2) {
+              char nb[3] = { bmpHex[i], bmpHex[i+1], '\0' };
+              Serial.write(reverseByte((uint8_t)strtol(nb, nullptr, 16)));
+            }
+            Serial.print("\r\n");
+          }
+        } else {
+          // Normal path: TSC printer reads BITMAP bytes LSB-first, so reverse each byte
+          Serial.printf("BITMAP %d,%d,%d,%d,0,", x, y, bw, bh);
+          for (int i = 0; bmpHex[i] != '\0' && bmpHex[i+1] != '\0'; i += 2) {
+            char nb[3] = { bmpHex[i], bmpHex[i+1], '\0' };
+            Serial.write(reverseByte((uint8_t)strtol(nb, nullptr, 16)));
+          }
+          Serial.print("\r\n");
         }
-        Serial.print("\r\n");
       } else {
         tsplLogo(x, y, e["name"] | "LOGO.BMP");
       }
@@ -330,7 +382,7 @@ void handleCommand(const String& payload) {
     executePrintJob(doc);
 
   } else if (cmd == "tare") {
-    tareGrams = latest.grams;
+    tareGrams = latest.value;
     notifyStatus("ok", "tared");
 
   } else if (cmd == "zero") {
@@ -354,7 +406,9 @@ void handleCommand(const String& payload) {
     notifyStatus("ok", "raw-sent");
 
   } else if (cmd == "status") {
-    String s = "g=" + String(latest.grams, 3) + ",t=" + String(tareGrams, 3);
+    String s = "v=" + String(latest.value, (unsigned int)latest.decimals) +
+               ",t=" + String(tareGrams, (unsigned int)latest.decimals) +
+               ",u=" + String(latest.unit);
     notifyStatus("ok", s);
 
   } else {
@@ -369,16 +423,20 @@ void handleCommand(const String& payload) {
 // ============================================================================
 void sendTestPrint() {
   Serial.print("DENSITY 9\r\n");
-  Serial.print("SIZE 81 mm,13 mm\r\n");
-  Serial.print("GAP 2.5 mm,0 mm\r\n");
+  // Print on the media the gap sensor is calibrated for (if known), so the test
+  // label doesn't knock the printer out of step with the loaded roll.
+  if (lastLabelW && lastLabelH) {
+    Serial.printf("SIZE %d mm,%d mm\r\n", lastLabelW, lastLabelH);
+  } else {
+    Serial.print("SIZE 81 mm,13 mm\r\n");
+    Serial.print("GAP 2.5 mm,0 mm\r\n");
+  }
   Serial.print("DIRECTION 0\r\n");
   Serial.print("SET TEAR ON\r\n");
   Serial.print("CLS\r\n");
   Serial.print("TEXT 40,5,\"2\",0,1,1,\"GS-LABEL TEST\"\r\n");
   Serial.print("TEXT 40,42,\"2\",0,1,1,\"BLE FIRMWARE OK\"\r\n");
   Serial.print("PRINT 1,1\r\n");
-  // Reset lastLabelW/H so first app print triggers GAPDETECT regardless of size
-  lastLabelW = 81; lastLabelH = 13;
 }
 
 // ============================================================================
@@ -425,8 +483,12 @@ void buttonReprint() {
   }
 
   // ── Substitute live weight into elements tagged with wt_var ────────────────
-  float netG = latest.grams - tareGrams;
+  float netG = latest.value - tareGrams;
   if (netG < 0) netG = 0;
+
+  // "Extra zero" setting from the app: pad one more decimal place so 200.20
+  // prints as 200.200. Cosmetic only — the value is unchanged.
+  uint8_t dec = latest.decimals + ((doc["xz"] | 0) ? 1 : 0);
 
   for (JsonObject e : doc["elements"].as<JsonArray>()) {
     const char* wv = e["wt_var"] | "";
@@ -434,15 +496,19 @@ void buttonReprint() {
 
     float g = 0;
     if      (strcmp(wv, "net")   == 0) g = netG;
-    else if (strcmp(wv, "gross") == 0) g = latest.grams;
+    else if (strcmp(wv, "gross") == 0) g = latest.value;
     else if (strcmp(wv, "tare")  == 0) g = tareGrams;
     else if (strcmp(wv, "metal") == 0) g = netG;
     else continue;  // stone: keep stored value
 
-    const char* pre = e["pre"] | "";
-    const char* suf = e["suf"] | "";
+    // Unit is a plain suffix chosen in the app; fall back to whatever the scale
+    // reports. Either way the number itself is printed unconverted.
+    const char* pre  = e["pre"]  | "";
+    const char* suf  = e["suf"]  | "";
+    const char* unit = e["unit"] | latest.unit;
     char buf[64];
-    snprintf(buf, sizeof(buf), "%s%.3f g%s", pre, g < 0 ? 0.0f : g, suf);
+    snprintf(buf, sizeof(buf), "%s%.*f%s%s%s", pre, (int)dec,
+             g < 0 ? 0.0f : g, *unit ? " " : "", unit, suf);
     e["text"] = (const char*)buf;
   }
 
@@ -534,25 +600,46 @@ void parseScaleLine(const char* line) {
   }
 
   // Capture digits and decimal point
-  while (*p && i < 19 && (*p == '.' || (*p >= '0' && *p <= '9'))) nb[i++] = *p++;
+  int8_t dot = -1;
+  while (*p && i < 19 && (*p == '.' || (*p >= '0' && *p <= '9'))) {
+    if (*p == '.') dot = i;
+    nb[i++] = *p++;
+  }
 
   if (i == 0) return;
 
   float v = atof(nb);
 
-  // Unit conversion
-  if (strstr(line, " kg") || strstr(line, " KG") || strstr(line, ",kg") || strstr(line, ",KG")) {
-    v *= 1000.0f;
-  } else if (strstr(line, " lb") || strstr(line, " LB")) {
-    v *= 453.592f;
-  } else if (strstr(line, " mg") || strstr(line, " MG")) {
-    v /= 1000.0f;
+  // Digits after the decimal point in the raw string: "5.620" -> 3, "5" -> 0.
+  uint8_t dec = (dot < 0) ? 0 : (uint8_t)(i - dot - 1);
+
+  // Unit token — taken verbatim from immediately after the number, NEVER used to
+  // rescale the value. Scanning the whole line would misfire: the "GS" in a
+  // "ST,GS,+ 5.620 g" header contains a 'G'. Handles "5.620 g" and "1.234kg" alike.
+  char unit[6] = "";
+  {
+    const char* q = p;
+    while (*q == ' ') q++;
+    uint8_t k = 0;
+    while (*q && k < sizeof(unit) - 1 &&
+           ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z'))) unit[k++] = *q++;
+    unit[k] = 0;
   }
 
-  // Time-based stability: stable if weight unchanged (±0.5g) for 1.5 s.
+  // Time-based stability: stable if the reading is unchanged for 1.5 s.
   // The original JBCTAG scale sends no stability token — we derive it from motion.
-  if (fabsf(v - prevGrams) > 0.5f) {
-    prevGrams = v;
+  // The ±0.5 g threshold is the original tuning and is kept exactly; it just has to
+  // be restated in the unit currently being reported, or a kg reading would never
+  // move by 0.5 and everything would read STABLE. This factor is used ONLY to size
+  // the motion window — it never touches the value that gets displayed or printed.
+  float tol = 0.5f;
+  if      (!strcasecmp(unit, "kg")) tol = 0.0005f;
+  else if (!strcasecmp(unit, "mg")) tol = 500.0f;
+  else if (!strcasecmp(unit, "ct")) tol = 2.5f;
+  else if (!strcasecmp(unit, "lb")) tol = 0.0011f;
+  else if (!strcasecmp(unit, "oz")) tol = 0.0176f;
+  if (fabsf(v - prevValue) > tol) {
+    prevValue = v;
     stableMs  = millis();
     latest.stable = false;
   } else {
@@ -566,8 +653,11 @@ void parseScaleLine(const char* line) {
       strstr(line, "UNSTABLE"))
     latest.stable = false;
 
-  latest.grams = v;
-  latest.tsMs  = millis();
+  latest.value    = v;
+  latest.decimals = dec;
+  strncpy(latest.unit, unit, sizeof(latest.unit) - 1);
+  latest.unit[sizeof(latest.unit) - 1] = 0;
+  latest.tsMs     = millis();
 }
 
 // Dual-mode scale reader:
@@ -611,13 +701,15 @@ void pushWeightOverBLE() {
   if (millis() - lastWeightPushMs < WEIGHT_PUSH_MS) return;
   lastWeightPushMs = millis();
 
-  StaticJsonDocument<128> doc;
-  doc["g"]  = latest.grams;
+  StaticJsonDocument<192> doc;
+  doc["g"]  = latest.value;                 // raw, exactly as the scale sent it
   doc["t"]  = tareGrams;
-  doc["n"]  = latest.grams - tareGrams;
+  doc["n"]  = latest.value - tareGrams;
   doc["s"]  = latest.stable ? 1 : 0;
+  doc["u"]  = latest.unit;                  // scale's own unit token ("" if none)
+  doc["d"]  = latest.decimals;              // raw precision, so the app can match it
   doc["ts"] = latest.tsMs;
-  char out[128];
+  char out[192];
   size_t n = serializeJson(doc, out, sizeof(out));
   pCharWeight->setValue((uint8_t*)out, n);
   pCharWeight->notify();
@@ -683,6 +775,9 @@ void setup() {
   if (storedJob.length() > 10) {
     lastPrintJson = storedJob;  // restore last template into RAM on boot
   }
+  // Restore the calibrated label size so the first button print skips GAPDETECT
+  lastLabelW = prefs.getUShort("calW", 0);
+  lastLabelH = prefs.getUShort("calH", 0);
 
   // Boot test print — fires 3 s after power-on, no BLE needed.
   delay(3000);

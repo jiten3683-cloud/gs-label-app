@@ -28,10 +28,11 @@ class _SettingsPageState extends State<SettingsPage> {
   final _leftMarginCtrl   = TextEditingController(text: '0');
   final _bleNameCtrl      = TextEditingController(text: 'GS-LABEL-BRIDGE');
   String _defaultUnit     = 'g';
-  int    _printDirection  = 0;   // 0 = Normal, 1 = Rotated 180°
+  int    _printDirection  = 1;   // 0 = Normal, 1 = Rotated 180°
+  bool   _extraZero       = false; // pad one extra trailing zero on weights
   bool   _loading         = true;
 
-  static const _units = ['g', 'mg', 'Tola', 'Carat', 'Kg'];
+  static const _units = ['g', 'mg', 'Tola', 'Carat', 'Kg', 'None'];
 
   @override void initState() { super.initState(); _load(); }
 
@@ -65,7 +66,8 @@ class _SettingsPageState extends State<SettingsPage> {
     _leftMarginCtrl.text   = s['print_left_margin_mm'] ?? '0';
     _bleNameCtrl.text      = s['ble_device_name']      ?? 'GS-LABEL-BRIDGE';
     _defaultUnit           = s['default_unit']     ?? 'g';
-    _printDirection        = int.tryParse(s['print_direction'] ?? '0') ?? 0;
+    _printDirection        = int.tryParse(s['print_direction'] ?? '1') ?? 1;
+    _extraZero             = (s['weight_extra_zero'] ?? '0') == '1';
     if (!_units.contains(_defaultUnit)) _defaultUnit = 'g';
     setState(() => _loading = false);
   }
@@ -122,6 +124,7 @@ class _SettingsPageState extends State<SettingsPage> {
       'ble_device_name':      _bleNameCtrl.text,
       'default_unit':    _defaultUnit,
       'print_direction': _printDirection.toString(),
+      'weight_extra_zero': _extraZero ? '1' : '0',
     };
     for (final e in entries.entries) await db.setSetting(e.key, e.value);
     ble.deviceName = _bleNameCtrl.text.trim().isNotEmpty
@@ -191,6 +194,16 @@ class _SettingsPageState extends State<SettingsPage> {
                   items: _units.map((u) =>
                       DropdownMenuItem(value: u, child: Text(u))).toList(),
                   onChanged: (v) => setState(() => _defaultUnit = v ?? 'g'),
+                ),
+                SwitchListTile(
+                  value: _extraZero,
+                  onChanged: (v) => setState(() => _extraZero = v),
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.exposure_zero),
+                  title: const Text('Extra Zero on Weight'),
+                  subtitle: Text(_extraZero
+                      ? 'On — a 200.20 reading prints as 200.200'
+                      : 'Off — weight prints exactly as the scale sends it'),
                 ),
                 const SizedBox(height: 12),
                 Row(children: [

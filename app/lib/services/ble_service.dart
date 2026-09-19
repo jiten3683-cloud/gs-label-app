@@ -33,10 +33,15 @@ class BleService extends ChangeNotifier {
 
   List<ScanResult> nearbyDevices = [];
 
+  // Raw scale readings — the numbers exactly as the scale sent them. The ESP32
+  // does not unit-convert, so these are in `scaleUnit`, whatever that happens to
+  // be. Never rescale them; the unit is carried alongside, not folded in.
   double grossG = 0.0;
   double tareG  = 0.0;
   double netG   = 0.0;
   bool   stable = false;
+  String scaleUnit     = '';   // unit token from the scale ('' if it sends none)
+  int    scaleDecimals = 3;    // digits after the decimal point in the raw string
   DateTime? lastSeen;
 
   BleService() {
@@ -204,6 +209,9 @@ class BleService extends ChangeNotifier {
       tareG   = (json['t'] as num).toDouble();
       netG    = (json['n'] as num).toDouble();
       stable  = (json['s'] as num) == 1;
+      // 'u'/'d' are absent on pre-passthrough firmware — keep the old defaults.
+      scaleUnit     = (json['u'] as String?) ?? scaleUnit;
+      scaleDecimals = (json['d'] as num?)?.toInt() ?? scaleDecimals;
       lastSeen = DateTime.now();
       notifyListeners();
     } catch (_) {}

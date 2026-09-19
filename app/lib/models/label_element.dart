@@ -87,10 +87,13 @@ class LabelElement {
         } else {
           wtStr = ctx.netStr; wtVar = 'net';
         }
+        // 'unit' rides along so a physical-button reprint on the ESP32 appends the
+        // same suffix the app chose, instead of falling back to a hardcoded "g".
         return {'type': 'text', 'x': x, 'y': y, 'font': font, 'rot': rotation,
                 'xs': xScale, 'ys': yScale, 'bold': bold,
                 'text': '$prefix$wtStr$suffix',
-                'wt_var': wtVar, 'pre': prefix, 'suf': suffix};
+                'wt_var': wtVar, 'pre': prefix, 'suf': suffix,
+                'unit': unit == 'None' ? '' : unit};
       case ElType.serial:
         return {'type': 'text', 'x': x, 'y': y, 'font': font, 'rot': rotation,
                 'xs': xScale, 'ys': yScale, 'bold': bold,

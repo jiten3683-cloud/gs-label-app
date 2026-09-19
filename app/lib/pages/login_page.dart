@@ -5,8 +5,8 @@ import 'package:url_launcher/url_launcher.dart' show launchUrl, canLaunchUrl;
 import '../services/license_service.dart';
 import 'home_shell.dart';
 
-const _supportPhone  = '+919828023683';
-const _supportEmail  = 'jbcorporation214@yahoo.com';
+const _supportPhone  = '';
+const _supportEmail  = '';
 const _kTrialDays    = 3;
 
 class LoginPage extends StatefulWidget {
@@ -335,7 +335,7 @@ class _LoginPageState extends State<LoginPage> {
                             Icon(Icons.copy, size: 14, color: Colors.grey.shade500),
                           ]),
                           const SizedBox(height: 2),
-                          Text('Share this with JBC support to receive your Activation Code',
+                          Text('Share this with support to receive your Activation Code',
                               style: TextStyle(fontSize: 9, color: Colors.grey.shade500)),
                         ]),
                       ),
@@ -399,11 +399,6 @@ class _TrialBanner extends StatelessWidget {
           const SizedBox(height: 8),
           Text('Days remaining: $daysLeft / $_kTrialDays',
               style: const TextStyle(fontSize: 13)),
-          const SizedBox(height: 4),
-          Text('For license activation contact:\n'
-              'Mobile: +91 9828023683\n'
-              'Email: jbcorporation214@yahoo.com',
-              style: TextStyle(fontSize: 11, color: cs.onPrimaryContainer.withOpacity(0.8))),
           const SizedBox(height: 12),
           Row(children: [
             Expanded(child: FilledButton(
@@ -445,12 +440,6 @@ class _ExpiredBanner extends StatelessWidget {
               'Your 3-day free trial has ended.\n'
               'Please activate your software license to continue.',
               style: TextStyle(fontSize: 12, color: cs.onErrorContainer)),
-          const SizedBox(height: 8),
-          Text('Contact Support:',
-              style: TextStyle(fontWeight: FontWeight.bold, color: cs.onErrorContainer)),
-          const SizedBox(height: 4),
-          Text('Mobile: +91 9828023683\nEmail: jbcorporation214@yahoo.com',
-              style: TextStyle(fontSize: 11, color: cs.onErrorContainer.withOpacity(0.9))),
           const SizedBox(height: 12),
           Row(children: [
             Expanded(child: FilledButton(
@@ -458,9 +447,14 @@ class _ExpiredBanner extends StatelessWidget {
               style: FilledButton.styleFrom(backgroundColor: cs.error),
               child: const Text('Activate License'),
             )),
-            const SizedBox(width: 8),
-            IconButton(onPressed: onCall,  icon: const Icon(Icons.call),  tooltip: 'Call Support'),
-            IconButton(onPressed: onEmail, icon: const Icon(Icons.email), tooltip: 'Email Support'),
+            if (_supportPhone.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              IconButton(onPressed: onCall, icon: const Icon(Icons.call), tooltip: 'Call Support'),
+            ],
+            if (_supportEmail.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              IconButton(onPressed: onEmail, icon: const Icon(Icons.email), tooltip: 'Email Support'),
+            ],
           ]),
         ]),
       ),
@@ -473,23 +467,25 @@ class _SupportFooter extends StatelessWidget {
   const _SupportFooter({required this.onCall, required this.onEmail});
 
   @override Widget build(BuildContext context) {
+    if (_supportPhone.isEmpty && _supportEmail.isEmpty) return const SizedBox.shrink();
     return Column(children: [
       Text('Support', style: TextStyle(fontSize: 11,
           color: Colors.grey.shade500, fontWeight: FontWeight.bold)),
       const SizedBox(height: 4),
       Wrap(alignment: WrapAlignment.center, children: [
-        TextButton.icon(
-          onPressed: onCall,
-          icon: const Icon(Icons.call, size: 14),
-          label: const Text('+91 9828023683', style: TextStyle(fontSize: 12)),
-        ),
-        TextButton.icon(
-          onPressed: onEmail,
-          icon: const Icon(Icons.email, size: 14),
-          label: const Text('jbcorporation214@yahoo.com', style: TextStyle(fontSize: 11)),
-        ),
+        if (_supportPhone.isNotEmpty)
+          TextButton.icon(
+            onPressed: onCall,
+            icon: const Icon(Icons.call, size: 14),
+            label: Text(_supportPhone, style: const TextStyle(fontSize: 12)),
+          ),
+        if (_supportEmail.isNotEmpty)
+          TextButton.icon(
+            onPressed: onEmail,
+            icon: const Icon(Icons.email, size: 14),
+            label: Text(_supportEmail, style: const TextStyle(fontSize: 11)),
+          ),
       ]),
-      Text('JBC Corporation', style: TextStyle(fontSize: 10, color: Colors.grey.shade400)),
     ]);
   }
 }

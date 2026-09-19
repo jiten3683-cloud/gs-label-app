@@ -144,6 +144,32 @@ class DbService {
       name: 'Gold/Silver Tag (50×25)', wMm: 50, hMm: 25, gapMm: 3, json: [],
       lines: ['{product}  {purity}', 'G:{gross}  N:{net}', 'T:{tare}  {date}', 'SN:{serial}'],
     );
+    await _seedBuiltin81x12();
+  }
+
+  // Seed the 81×12 built-in template if it doesn't exist.
+  // Called on every startup so existing installs also receive it.
+  Future<void> ensureBuiltinTemplates() => _seedBuiltin81x12();
+
+  static const _kBuiltin81x12Elements = [
+    {'t':'qr',     'x':157,'y':15, 'text':'',         'font':'3','xs':1,'ys':1,'rot':0,'bold':false,'data':'{product},{serial},{net},{gross},{code}','btype':'128','bh':60,'bw':120,'ecc':'M','qs':2,'xe':100,'ye':50, 'th':2,'pre':'', 'suf':'','wt':0,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+    {'t':'text',   'x':15, 'y':12, 'text':'{product}','font':'1','xs':1,'ys':1,'rot':0,'bold':false,'data':'',                                       'btype':'128','bh':60,'bw':120,'ecc':'M','qs':4,'xe':584,'ye':28,'th':2,'pre':'', 'suf':'','wt':0,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+    {'t':'weight', 'x':18, 'y':27, 'text':'',         'font':'1','xs':1,'ys':1,'rot':0,'bold':false,'data':'',                                       'btype':'128','bh':60,'bw':120,'ecc':'M','qs':4,'xe':584,'ye':52,'th':2,'pre':'G:','suf':' ','wt':1,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+    {'t':'weight', 'x':18, 'y':61, 'text':'',         'font':'1','xs':1,'ys':1,'rot':0,'bold':false,'data':'',                                       'btype':'128','bh':60,'bw':120,'ecc':'M','qs':4,'xe':584,'ye':76,'th':2,'pre':'N:','suf':' ','wt':0,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+    {'t':'serial', 'x':256,'y':54, 'text':'',         'font':'1','xs':1,'ys':1,'rot':0,'bold':false,'data':'',                                       'btype':'128','bh':60,'bw':120,'ecc':'M','qs':4,'xe':100,'ye':100,'th':2,'pre':'','suf':'', 'wt':0,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+    {'t':'text',   'x':256,'y':17, 'text':'{purity}', 'font':'1','xs':1,'ys':1,'rot':0,'bold':false,'data':'',                                       'btype':'128','bh':60,'bw':120,'ecc':'M','qs':4,'xe':100,'ye':100,'th':2,'pre':'','suf':'', 'wt':0,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+    {'t':'text',   'x':254,'y':36, 'text':'{shop}',   'font':'1','xs':1,'ys':1,'rot':0,'bold':false,'data':'',                                       'btype':'128','bh':60,'bw':120,'ecc':'M','qs':4,'xe':100,'ye':100,'th':2,'pre':'','suf':'', 'wt':0,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+    {'t':'weight', 'x':16, 'y':45, 'text':'',         'font':'1','xs':1,'ys':1,'rot':0,'bold':false,'data':'',                                       'btype':'128','bh':60,'bw':120,'ecc':'M','qs':4,'xe':100,'ye':100,'th':2,'pre':'T:','suf':' ','wt':2,'logo_path':'','logo_bmp':'','logo_bmpw':0,'logo_w':80,'logo_h':48},
+  ];
+
+  Future<void> _seedBuiltin81x12() async {
+    final existing = await _db.query('templates',
+        where: 'name=?', whereArgs: ['81*12_11'], limit: 1);
+    if (existing.isNotEmpty) return;
+    await saveTemplate(
+      name: '81*12_11', wMm: 81, hMm: 12, gapMm: 3,
+      json: _kBuiltin81x12Elements,
+    );
   }
 
   static List<String> parseLines(Map<String, dynamic> row) {

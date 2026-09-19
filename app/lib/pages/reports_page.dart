@@ -17,6 +17,19 @@ import '../services/ble_service.dart';
 import '../services/db_service.dart';
 import '../widgets/label_canvas.dart';
 
+// Weight label formatting for reprints — matches the exact precision stored in
+// the DB instead of forcing 3 decimals (e.g. 20.1234 -> "20.1234 g", 20 -> "20 g").
+int _valueDecimals(double v) {
+  final s = v.toString();
+  final i = s.indexOf('.');
+  if (i < 0) return 0;
+  final frac = s.substring(i + 1);
+  return frac == '0' ? 0 : frac.length;
+}
+
+String _gramStr(double grams, [int? decimals]) =>
+    '${grams.toStringAsFixed(decimals ?? _valueDecimals(grams))} g';
+
 // ─── Date preset ──────────────────────────────────────────────────────────────
 enum _Preset { today, yesterday, week, month, custom }
 
@@ -670,11 +683,13 @@ class _LabelPreviewSheetState extends State<_LabelPreviewSheet> {
       final s = await db.getAllSettings();
 
       final ctx = LabelContext(
-        netStr:         '${netG.toStringAsFixed(3)} g',
-        grossStr:       '${grossG.toStringAsFixed(3)} g',
-        tareStr:        '${tareG.toStringAsFixed(3)} g',
-        stoneStr:       stoneG > 0 ? '${stoneG.toStringAsFixed(3)} g' : '',
-        metalStr:       '${metalG.toStringAsFixed(3)} g',
+        netStr:         _gramStr(netG),
+        grossStr:       _gramStr(grossG),
+        tareStr:        _gramStr(tareG),
+        stoneStr:       stoneG > 0 ? _gramStr(stoneG) : '',
+        metalStr:       _gramStr(metalG,
+                            _valueDecimals(netG) > _valueDecimals(stoneG)
+                                ? _valueDecimals(netG) : _valueDecimals(stoneG)),
         serial:         row['serial']  as String? ?? '',
         dateStr:        DateFormat('dd-MM-yyyy').format(ts),
         timeStr:        DateFormat('HH:mm').format(ts),

@@ -8,12 +8,34 @@ import '../services/db_service.dart';
 import '../models/label_element.dart';
 import '../widgets/label_canvas.dart';
 
-const _unitFactors = {'g': 1.0, 'mg': 1000.0, 'Tola': 1 / 11.6638, 'Carat': 1 / 0.2, 'Kg': 0.001};
-const _unitDecimals = {'g': 3, 'mg': 1, 'Tola': 4, 'Carat': 3, 'Kg': 6};
+// Unit is a SUFFIX ONLY — it is never used to rescale a reading. The scale sends
+// whatever unit it is switched to and the ESP32 forwards that number untouched,
+// so converting here would corrupt it (a 1.234 kg reading is 1.234, not 1234).
+const _unitOptions = ['g', 'mg', 'Tola', 'Carat', 'Kg', 'None'];
 
-double _convert(double grams, String unit) => grams * (_unitFactors[unit] ?? 1.0);
-String _fmt(double grams, String unit) =>
-    '${_convert(grams, unit).toStringAsFixed(_unitDecimals[unit] ?? 3)} $unit';
+// Decimals present in a raw text input, e.g. "20.10" -> 2, "20" -> 0.
+int _rawDecimals(String s) {
+  final t = s.trim();
+  final i = t.indexOf('.');
+  return i < 0 ? 0 : t.length - i - 1;
+}
+
+// Natural decimals of a double using its shortest round-trip form:
+// 20.1234 -> 4, 20.0 -> 0, 20.5 -> 1. Used for values coming from the scale.
+int _valueDecimals(double v) {
+  final s = v.toString();
+  final i = s.indexOf('.');
+  if (i < 0) return 0;
+  final frac = s.substring(i + 1);
+  return frac == '0' ? 0 : frac.length;
+}
+
+// Print the reading exactly as received, at the source's own precision, with the
+// chosen unit appended as a plain suffix. No conversion happens at any point.
+String _fmt(double value, String unit, {int? srcDecimals}) {
+  final text = value.toStringAsFixed(srcDecimals ?? _valueDecimals(value));
+  return unit == 'None' ? text : '$text $unit';
+}
 
 String _expandDots(String line, int wMm) {
   if (!line.contains('...')) return line;
@@ -87,6 +109,9 @@ class _ScalePageState extends State<ScalePage> {
   final _qp3Ctrl          = TextEditingController();
 
   String _unit            = 'g';
+  // Pads one extra trailing zero onto every weight (200.20 -> 200.200). Purely
+  // cosmetic — it widens the printed precision, it never changes the value.
+  bool   _extraZero       = false;
   int?   _templateId;
   String _productCategory = '';
   String _productCode     = '';
@@ -144,8 +169,9 @@ class _ScalePageState extends State<ScalePage> {
     if (!mounted) return;
     setState(() {
       final unit    = s['default_unit'] ?? 'g';
-      _unit         = _unitFactors.containsKey(unit) ? unit : 'g';
-      _printDirection  = int.tryParse(s['print_direction']    ?? '0') ?? 0;
+      _unit         = _unitOptions.contains(unit) ? unit : 'g';
+      _extraZero    = (s['weight_extra_zero'] ?? '0') == '1';
+      _printDirection  = int.tryParse(s['print_direction']    ?? '1') ?? 1;
       _topMarginMm     = int.tryParse(s['print_top_margin_mm']  ?? '1') ?? 1;
       _leftMarginMm    = int.tryParse(s['print_left_margin_mm'] ?? '0') ?? 0;
       _shopName        = s['shop_name']        ?? '';
@@ -198,6 +224,25 @@ class _ScalePageState extends State<ScalePage> {
           : (_resolvedGross - _appTareG).clamp(0, double.infinity);
   double get _stoneG   => (double.tryParse(_stoneCtrl.text) ?? 0).clamp(0, double.infinity);
   double get _metalNet => (_resolvedNet  - _stoneG).clamp(0, double.infinity);
+
+  // Source precision for each weight — drives how many decimals get printed so
+  // the label matches exactly what the scale sent / the user typed.
+  // In live mode the scale reports its own decimal count, which is authoritative:
+  // "0.020 kg" round-trips through a float as 0.02, so inferring from the value
+  // would drop a digit the scale actually displayed.
+  // Applied at the leaf getters only, so net/metal inherit it via their max()
+  // instead of stacking a second zero on top.
+  int _pad(int d) => _extraZero ? d + 1 : d;
+
+  int get _grossDecimals => _pad(_manualMode
+      ? _rawDecimals(_manGrossCtrl.text)
+      : context.read<BleService>().scaleDecimals);
+  int get _tareDecimals => _pad(_manualMode
+      ? _rawDecimals(_manTareCtrl.text)
+      : context.read<BleService>().scaleDecimals);
+  int get _netDecimals   => _grossDecimals > _tareDecimals ? _grossDecimals : _tareDecimals;
+  int get _stoneDecimals => _pad(_rawDecimals(_stoneCtrl.text));
+  int get _metalDecimals => _netDecimals > _stoneDecimals ? _netDecimals : _stoneDecimals;
   double get _rate     => double.tryParse(_rateCtrl.text)   ?? 0;
   double get _making   => double.tryParse(_makingCtrl.text) ?? 0;
   double get _amount   => _metalNet * _rate * (1 + _making / 100);
@@ -237,11 +282,11 @@ class _ScalePageState extends State<ScalePage> {
     final stoG = _stoneG;
     final metG = _metalNet;
     return LabelContext(
-      netStr:    _fmt(_resolvedNet,   _unit),
-      grossStr:  _fmt(_resolvedGross, _unit),
-      tareStr:   _fmt(_resolvedTare,  _unit),
-      stoneStr:  stoG > 0 ? _fmt(stoG, _unit) : '',
-      metalStr:  _fmt(metG, _unit),
+      netStr:    _fmt(_resolvedNet,   _unit, srcDecimals: _netDecimals),
+      grossStr:  _fmt(_resolvedGross, _unit, srcDecimals: _grossDecimals),
+      tareStr:   _fmt(_resolvedTare,  _unit, srcDecimals: _tareDecimals),
+      stoneStr:  stoG > 0 ? _fmt(stoG, _unit, srcDecimals: _stoneDecimals) : '',
+      metalStr:  _fmt(metG, _unit, srcDecimals: _metalDecimals),
       serial:    serial,
       dateStr:   DateFormat('dd-MM-yyyy').format(now),
       timeStr:   DateFormat('HH:mm').format(now),
@@ -314,7 +359,9 @@ class _ScalePageState extends State<ScalePage> {
           logoWidthDots: m['logo_w'] as int? ?? 80,
           logoHeightDots: m['logo_h'] as int? ?? 48,
           prefix: m['pre'] ?? '', suffix: m['suf'] ?? '',
-          decimals: m['dec'] ?? 3, unit: m['unit'] ?? 'g',
+          // The Scale-page dropdown is the suffix of record — the stored template
+          // value is only a fallback for elements saved before it existed.
+          decimals: m['dec'] ?? 3, unit: _unit,
           wtType: _wtTypeFrom(m),
         ).toJson(ctx);
         result.add(resolved);
@@ -427,10 +474,15 @@ class _ScalePageState extends State<ScalePage> {
     final tplRow = await db.getTemplate(_templateId!);
     if (tplRow == null || !mounted) return;
 
-    // Refresh margins from DB in case Settings were changed this session
+    // Refresh all settings from DB in case Settings were changed this session
     final ms = await db.getAllSettings();
-    _topMarginMm  = int.tryParse(ms['print_top_margin_mm']  ?? '1') ?? 1;
-    _leftMarginMm = int.tryParse(ms['print_left_margin_mm'] ?? '0') ?? 0;
+    _topMarginMm     = int.tryParse(ms['print_top_margin_mm']  ?? '1') ?? 1;
+    _leftMarginMm    = int.tryParse(ms['print_left_margin_mm'] ?? '0') ?? 0;
+    _shopName        = ms['shop_name']        ?? '';
+    _companyName     = ms['company_name']     ?? '';
+    _companyAddress  = ms['company_address']  ?? '';
+    _companyPhone    = ms['company_phone']    ?? '';
+    _companyGst      = ms['company_gst']      ?? '';
 
     final ctx      = _buildCtx('PREVIEW');
     final elements = _resolveTemplate(tplRow, ctx);
@@ -459,10 +511,15 @@ class _ScalePageState extends State<ScalePage> {
     final tplRow = await db.getTemplate(_templateId!);
     if (tplRow == null) { _toast('Template not found'); return; }
 
-    // Refresh margins from DB in case Settings were changed this session
-    final ms       = await db.getAllSettings();
-    _topMarginMm   = int.tryParse(ms['print_top_margin_mm']  ?? '1') ?? 1;
-    _leftMarginMm  = int.tryParse(ms['print_left_margin_mm'] ?? '0') ?? 0;
+    // Refresh all settings from DB in case Settings were changed this session
+    final ms         = await db.getAllSettings();
+    _topMarginMm     = int.tryParse(ms['print_top_margin_mm']  ?? '1') ?? 1;
+    _leftMarginMm    = int.tryParse(ms['print_left_margin_mm'] ?? '0') ?? 0;
+    _shopName        = ms['shop_name']        ?? '';
+    _companyName     = ms['company_name']     ?? '';
+    _companyAddress  = ms['company_address']  ?? '';
+    _companyPhone    = ms['company_phone']    ?? '';
+    _companyGst      = ms['company_gst']      ?? '';
 
     final prefix   = await db.getSetting('serial_prefix', def: 'GS-');
     final suffix   = await db.getSetting('serial_suffix', def: '');
@@ -474,16 +531,19 @@ class _ScalePageState extends State<ScalePage> {
     if (elements.isEmpty) { _toast('Template has no content — add lines or design elements'); return; }
 
     final darkStr = await db.getSetting('default_darkness', def: '8');
-    final dirStr  = await db.getSetting('print_direction', def: '0');
+    final dirStr  = await db.getSetting('print_direction', def: '1');
     final copies  = int.tryParse(_copiesCtrl.text) ?? 1;
     final job = {
       'cmd': 'print',
       'label': {
         'w': tplRow['width_mm'], 'h': tplRow['height_mm'],
         'gap': tplRow['gap_mm'], 'darkness': int.tryParse(darkStr) ?? 8,
-        'dir': int.tryParse(dirStr) ?? 0,
+        'dir': int.tryParse(dirStr) ?? 1,
       },
       'copies': copies,
+      // Extra-zero padding travels with the job so a physical-button reprint on
+      // the ESP32 formats the live weight the same way the app just did.
+      'xz': _extraZero ? 1 : 0,
       'elements': elements,
     };
 
@@ -544,9 +604,9 @@ class _ScalePageState extends State<ScalePage> {
         {'type': 'text', 'x': 8, 'y': 8 + e.key * 32,
          'font': '3', 'xs': 1, 'ys': 1, 'rot': 0, 'text': e.value}).toList();
 
-    final dirStr2 = await db.getSetting('print_direction', def: '0');
+    final dirStr2 = await db.getSetting('print_direction', def: '1');
     final job = {'cmd': 'print',
-        'label': {'w': wMm, 'h': hMm, 'gap': gap, 'dir': int.tryParse(dirStr2) ?? 0},
+        'label': {'w': wMm, 'h': hMm, 'gap': gap, 'dir': int.tryParse(dirStr2) ?? 1},
         'copies': 1, 'elements': elems};
     final sent = await ble.sendPrintJob(job);
     if (!sent) {
@@ -584,7 +644,7 @@ class _ScalePageState extends State<ScalePage> {
                 onCapture: ble.isConnected ? _captureFromScale : null,
                 onChanged: () => setState(() {}))
             : _WeightCard(
-                ble: ble, unit: _unit,
+                ble: ble, unit: _unit, extraZero: _extraZero,
                 appTareCtrl: _appTareCtrl, appTareG: _appTareG,
                 onTareChanged: (v) => setState(() => _appTareG = v),
               ),
@@ -629,7 +689,9 @@ class _ScalePageState extends State<ScalePage> {
                     color: _scaleRaw.isEmpty ? Colors.grey : Colors.greenAccent),
               ),
               const SizedBox(height: 4),
-              Text('Parsed: ${ble.grossG.toStringAsFixed(3)} g  '
+              Text('Parsed: ${ble.grossG.toStringAsFixed(ble.scaleDecimals)} '
+                  '${ble.scaleUnit.isEmpty ? "(no unit)" : ble.scaleUnit}  '
+                  'Suffix: $_unit  '
                   'Stable: ${ble.stable}  '
                   'Updated: ${ble.lastSeen != null ? "${DateTime.now().difference(ble.lastSeen!).inSeconds}s ago" : "never"}',
                   style: const TextStyle(fontFamily: 'monospace',
@@ -665,68 +727,13 @@ class _ScalePageState extends State<ScalePage> {
           ],
           DropdownButton<String>(
             value: _unit, isDense: true,
-            items: _unitFactors.keys
+            items: _unitOptions
                 .map((u) => DropdownMenuItem(value: u, child: Text(u))).toList(),
             onChanged: (v) => setState(() => _unit = v ?? 'g'),
           ),
         ]),
 
-        // ── Stone weight ────────────────────────────────────────────────────
-        const SizedBox(height: 12),
-        Row(children: [
-          Expanded(child: TextField(
-            controller: _stoneCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(
-              labelText: 'Stone Weight (g)', prefixIcon: Icon(Icons.diamond_outlined),
-              suffixText: 'g', border: OutlineInputBorder(), isDense: true,
-            ),
-          )),
-          if (_stoneG > 0) ...[
-            const SizedBox(width: 10),
-            Expanded(child: Card(
-              color: Colors.amber.shade50,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Text('Metal Net', style: TextStyle(fontSize: 11, color: Colors.grey)),
-                  Text(_fmt(_metalNet, _unit),
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                ]),
-              ),
-            )),
-          ],
-        ]),
-
         const Divider(height: 24),
-
-        // ── Amount preview ──────────────────────────────────────────────────
-        if (_rate > 0) Card(
-          color: Theme.of(context).colorScheme.primaryContainer,
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(children: [
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Net: ${_fmt(_resolvedNet, _unit)}',
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
-                if (_stoneG > 0) ...[
-                  Text('Stone: − ${_fmt(_stoneG, _unit)}',
-                      style: const TextStyle(color: Colors.deepOrange)),
-                  Text('Metal: ${_fmt(_metalNet, _unit)}',
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                ],
-                Text('Making: ${_making.toStringAsFixed(1)}%  '
-                    '= ₹${(_metalNet * _rate * _making / 100).toStringAsFixed(2)}'),
-              ])),
-              Text('₹${_amount.toStringAsFixed(2)}',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
-                      color: Theme.of(context).colorScheme.primary)),
-            ]),
-          ),
-        ),
-        const SizedBox(height: 8),
 
         // ── Product picker ──────────────────────────────────────────────────
         InkWell(
@@ -742,20 +749,6 @@ class _ScalePageState extends State<ScalePage> {
           ),
         ),
         const SizedBox(height: 10),
-        Row(children: [
-          Expanded(child: _tf(_purityCtrl, 'Purity', TextInputType.text)),
-          const SizedBox(width: 8),
-          Expanded(child: _tf(_hsnCtrl, 'HSN Code', TextInputType.number)),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [
-          Expanded(child: _tf(_rateCtrl, 'Rate/g (₹)', TextInputType.number,
-              onChanged: (_) => setState(() {}))),
-          const SizedBox(width: 8),
-          SizedBox(width: 110, child: _tf(_makingCtrl, 'Making %',
-              TextInputType.number, onChanged: (_) => setState(() {}))),
-        ]),
-        const SizedBox(height: 8),
         Row(children: [
           Expanded(child: DropdownButtonFormField<int>(
             initialValue: _templateId,
@@ -889,6 +882,7 @@ class _ScalePageState extends State<ScalePage> {
 class _WeightCard extends StatelessWidget {
   final BleService ble;
   final String unit;
+  final bool extraZero;
   final TextEditingController appTareCtrl;
   final double appTareG;
   final ValueChanged<double> onTareChanged;
@@ -896,6 +890,7 @@ class _WeightCard extends StatelessWidget {
   const _WeightCard({
     required this.ble,
     required this.unit,
+    required this.extraZero,
     required this.appTareCtrl,
     required this.appTareG,
     required this.onTareChanged,
@@ -905,6 +900,8 @@ class _WeightCard extends StatelessWidget {
     final stable = ble.stable;
     final col    = stable ? Colors.greenAccent : Colors.orange;
     final net    = (ble.grossG - appTareG).clamp(0.0, double.infinity);
+    // Match the scale's own precision exactly, plus the optional padding zero.
+    final netDec = ble.scaleDecimals + (extraZero ? 1 : 0);
 
     return Container(
       width: double.infinity,
@@ -934,7 +931,7 @@ class _WeightCard extends StatelessWidget {
           Flexible(child: FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerRight,
-            child: Text(_fmt(net, unit),
+            child: Text(_fmt(net, unit, srcDecimals: netDec),
                 style: TextStyle(fontSize: 44, fontWeight: FontWeight.bold,
                     fontFamily: 'monospace', color: col, letterSpacing: 1)),
           )),
@@ -944,7 +941,8 @@ class _WeightCard extends StatelessWidget {
         const SizedBox(height: 10),
         // ── GROSS (read-only) + TARE (editable) ─────────────────────────────
         Row(children: [
-          Expanded(child: _wCard('GROSS', _fmt(ble.grossG, unit), Colors.white)),
+          Expanded(child: _wCard('GROSS',
+              _fmt(ble.grossG, unit, srcDecimals: netDec), Colors.white)),
           const SizedBox(width: 8),
           Expanded(child: _editableTare()),
         ]),
@@ -1099,7 +1097,11 @@ class _ManualWeightPanel extends StatelessWidget {
             Flexible(child: FittedBox(
               fit: BoxFit.scaleDown,
               alignment: Alignment.centerRight,
-              child: Text(_fmt(net < 0 ? 0 : net, unit),
+              child: Text(
+                  _fmt(net < 0 ? 0 : net, unit,
+                      srcDecimals: _rawDecimals(grossCtrl.text) > _rawDecimals(tareCtrl.text)
+                          ? _rawDecimals(grossCtrl.text)
+                          : _rawDecimals(tareCtrl.text)),
                   style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold,
                       fontFamily: 'monospace', color: Colors.greenAccent)),
             )),

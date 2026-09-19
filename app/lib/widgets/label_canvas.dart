@@ -85,7 +85,8 @@ class LabelCanvas extends StatelessWidget {
         final data = (el['data'] as String? ?? '').isEmpty
             ? 'SAMPLE' : el['data'] as String;
         // qrSize is cell-width in dots; typical QR ≈25 modules → physical size = qrSize*25 dots
-        final sz = ((el['size'] as num? ?? 4) * 25.0 * scale).clamp(16.0, 300.0);
+        // Minimum 48px so QrImageView renders correctly even at size 2
+        final sz = ((el['size'] as num? ?? 4) * 25.0 * scale).clamp(48.0, 300.0);
         try {
           return SizedBox(width: sz, height: sz, child: QrImageView(
             data: data, version: QrVersions.auto, size: sz,
