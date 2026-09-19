@@ -154,8 +154,14 @@ void tsplText(int x, int y, const String& font, int rot,
 
 void tsplQR(int x, int y, const String& ecc, int cell,
             const String& mode, int rot, const String& data) {
+  // A raw CR/LF would end the TSPL command mid-string. TSPL's QRCODE escapes
+  // \[R] and \[L] put real CR/LF bytes into the QR instead, so the
+  // scanned text keeps its line breaks.
+  String d = data;
+  d.replace("\r", "\\[R]");
+  d.replace("\n", "\\[L]");
   Serial.printf("QRCODE %d,%d,%s,%d,%s,%d,\"%s\"\r\n",
-                x, y, ecc.c_str(), cell, mode.c_str(), rot, data.c_str());
+                x, y, ecc.c_str(), cell, mode.c_str(), rot, d.c_str());
 }
 
 void tsplBarcode(int x, int y, const String& type, int h, int hr, int rot,
@@ -491,6 +497,27 @@ void buttonReprint() {
   uint8_t dec = latest.decimals + ((doc["xz"] | 0) ? 1 : 0);
 
   for (JsonObject e : doc["elements"].as<JsonArray>()) {
+    // QR with weight tokens: rebuild its data from the template the app kept.
+    // metal = live net − the stone deduction the operator entered in the app.
+    const char* tpl = e["tpl"] | "";
+    if (*tpl) {
+      const char* unit = e["unit"] | latest.unit;
+      float metal = netG - (e["stone"] | 0.0f);
+      auto fmt = [&](float v) {
+        char b[32];
+        snprintf(b, sizeof(b), "%.*f%s%s", (int)dec, v < 0 ? 0.0f : v,
+                 *unit ? " " : "", unit);
+        return String(b);
+      };
+      String q = tpl;
+      q.replace("{net}",   fmt(netG));
+      q.replace("{gross}", fmt(latest.value));
+      q.replace("{tare}",  fmt(tareGrams));
+      q.replace("{metal}", fmt(metal));
+      e["data"] = q;
+      continue;
+    }
+
     const char* wv = e["wt_var"] | "";
     if (!*wv) continue;
 

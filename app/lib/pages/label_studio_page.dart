@@ -35,6 +35,7 @@ const _varGroups = [
   ('Pricing', ['{rate}','{amount}','{making}']),
   ('Print',   ['{serial}','{date}','{time}']),
   ('Shop',    ['{shop}','{company}','{address}','{phone}','{gst}']),
+  ('QR format', ['{nl}','{tab}']),
 ];
 
 const _varHints = <String, String>{
@@ -47,6 +48,7 @@ const _varHints = <String, String>{
   '{shop}':'Shop/display name', '{company}':'Legal company name',
   '{address}':'Business address', '{phone}':'Phone number',
   '{gst}':'GST number',
+  '{nl}':'QR: new line (CR+LF)', '{tab}':'QR: tab / next column',
 };
 
 // Infer weight type from stored 'wt' field, falling back to prefix text for
@@ -1300,9 +1302,12 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
     widget.onChange();
   }
 
-  Widget _tf(String label, TextEditingController c, FocusNode fn, {String hint = ''}) =>
+  Widget _tf(String label, TextEditingController c, FocusNode fn,
+      {String hint = '', bool multiline = false}) =>
       TextField(
         controller: c, focusNode: fn,
+        minLines: 1, maxLines: multiline ? 5 : 1,
+        keyboardType: multiline ? TextInputType.multiline : TextInputType.text,
         style: const TextStyle(fontSize: 13),
         decoration: InputDecoration(
           labelText: label, hintText: hint, isDense: true,
@@ -1483,8 +1488,9 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
             ]),
 
           ElType.qr => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              _tf('QR Data (use {variable} tokens)', _data, _dataFn,
-                  hint: '{serial}|{net}|{product}'),
+              _tf('QR Data (use {variable} tokens, Enter or {nl} = new line)',
+                  _data, _dataFn, multiline: true,
+                  hint: 'Item: {product}{nl}Net: {net}{nl}Serial: {serial}'),
               const SizedBox(height: 6),
               Row(children: [
                 _numRow('Size', el.qrSize, (v) => el.qrSize = v, mn: 1, mx: 10),
