@@ -417,6 +417,20 @@ class LicenseService {
                     '${android.board}|${android.hardware}';
         return sha256.convert(utf8.encode(raw)).toString();
       }
+      if (Platform.isIOS) {
+        // iOS exposes no fixed hardware id. A random id kept in the Keychain
+        // stays the same across launches and app reinstalls on this iPhone.
+        const key = 'ios_device_id';
+        var id = await _storage.read(key: key);
+        if (id == null || id.isEmpty) {
+          final ios = await DeviceInfoPlugin().iosInfo;
+          id = '${ios.identifierForVendor ?? ''}|'
+               '${DateTime.now().microsecondsSinceEpoch}';
+          await _storage.write(key: key, value: id);
+        }
+        final ios = await DeviceInfoPlugin().iosInfo;
+        return sha256.convert(utf8.encode('$id|${ios.utsname.machine}')).toString();
+      }
     } catch (_) {}
     // Fallback — only reached if device_info fails
     return sha256.convert(

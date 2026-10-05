@@ -1,0 +1,80 @@
+name: iOS build → TestFlight
+
+# Builds the iPhone app on a GitHub macOS machine, signs it with the
+# App Store Connect API key (Xcode cloud-managed signing, no certificates to
+# keep), and uploads it to App Store Connect / TestFlight.
+# Run it from the Actions tab ("Run workflow").
+#
+# Repository secrets needed (Settings → Secrets and variables → Actions):
+#   APPLE_TEAM_ID          10-character Team ID (developer.apple.com → Membership)
+#   ASC_KEY_ID             App Store Connect API key ID
+#   ASC_ISSUER_ID          Issuer ID shown above the API keys list
+#   ASC_KEY_P8_BASE64      the downloaded AuthKey_XXXX.p8, base64-encoded
+# The API key needs the Admin role so Xcode may create the distribution
+# certificate and App Store profile itself.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.9'
+          channel: stable
+          cache: true
+
+      - name: API key
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          echo "${{ secrets.ASC_KEY_P8_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
+
+      - name: Flutter build (no signing yet)
+        # Build number must grow with every upload: 1000 + run number.
+        run: |
+          flutter pub get
+          flutter build ios --release --no-codesign \
+            --build-number=$((1000 + ${{ github.run_number }}))
+
+      - name: Archive (signed)
+        run: |
+          xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            CODE_SIGN_STYLE=Automatic \
+            archive
+
+      - name: Upload to App Store Connect
+        run: |
+          cat > "$RUNNER_TEMP/export.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"

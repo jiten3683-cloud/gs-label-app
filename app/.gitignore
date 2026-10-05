@@ -33,7 +33,7 @@ pubspec.lock
 
 # Generated host-platform folders (the GitHub Action regenerates them)
 /android/
-/ios/
+# /ios/ is committed: it carries the bundle id, permissions, icons and Podfile
 /linux/
 /macos/
 /windows/
