@@ -48,7 +48,7 @@ const _varHints = <String, String>{
   '{shop}':'Shop/display name', '{company}':'Legal company name',
   '{address}':'Business address', '{phone}':'Phone number',
   '{gst}':'GST number',
-  '{nl}':'QR: new line (CR+LF)', '{tab}':'QR: tab / next column',
+  '{nl}':'QR: new line (Enter)', '{tab}':'QR: tab / next column',
 };
 
 // Infer weight type from stored 'wt' field, falling back to prefix text for
@@ -259,6 +259,8 @@ class _LabelStudioState extends State<LabelStudioPage> {
       data: m['data'] as String? ?? '',
       barcodeType: m['btype'] as String? ?? '128',
       barcodeHeight: m['bh'] as int? ?? 60, barcodeWidth: m['bw'] as int? ?? 120,
+      barcodeDigitsOnly: m['dig'] == true,
+      barcodeBarDots: (m['bn'] as num?)?.toInt() ?? 0,
       qrEcc: m['ecc'] as String? ?? 'M', qrSize: m['qs'] as int? ?? 4,
       xEnd: m['xe'] as int? ?? 100, yEnd: m['ye'] as int? ?? 50,
       thickness: m['th'] as int? ?? 2,
@@ -601,6 +603,8 @@ class _LabelEditorState extends State<_LabelEditorPage> {
       data: m['data'] as String? ?? '',
       barcodeType: m['btype'] as String? ?? '128',
       barcodeHeight: m['bh'] as int? ?? 60, barcodeWidth: m['bw'] as int? ?? 120,
+      barcodeDigitsOnly: m['dig'] == true,
+      barcodeBarDots: (m['bn'] as num?)?.toInt() ?? 0,
       qrEcc: m['ecc'] as String? ?? 'M', qrSize: m['qs'] as int? ?? 4,
       xEnd: m['xe'] as int? ?? 100, yEnd: m['ye'] as int? ?? 50,
       thickness: m['th'] as int? ?? 2,
@@ -619,6 +623,8 @@ class _LabelEditorState extends State<_LabelEditorPage> {
     'text': el.text, 'font': el.font, 'xs': el.xScale, 'ys': el.yScale, 'rot': el.rotation,
     'bold': el.bold,
     'data': el.data, 'btype': el.barcodeType, 'bh': el.barcodeHeight, 'bw': el.barcodeWidth,
+    'dig': el.barcodeDigitsOnly,
+    'bn': el.barcodeBarDots,
     'ecc': el.qrEcc, 'qs': el.qrSize,
     'xe': el.xEnd, 'ye': el.yEnd, 'th': el.thickness,
     'pre': el.prefix, 'suf': el.suffix,
@@ -689,7 +695,8 @@ class _LabelEditorState extends State<_LabelEditorPage> {
         el.qrSize = (smallSide ~/ 30).clamp(2, 10);
         el.x = (_wMm * 8 - el.qrSize * 25) ~/ 2;
       case ElType.bar:
-        el.data = '{serial}'; el.barcodeWidth = (_wMm * 8 - 32).clamp(80, 400);
+        el.data = '{serial}'; el.barcodeBarDots = 2;
+        el.barcodeWidth = 2 * barcodeModules(el.barcodeType, barcodeSample(el.data));
         el.x = 16; el.barcodeHeight = (_hMm * 8 ~/ 2).clamp(24, 48);
       case ElType.box:
         el.x = 0; el.y = 0;
@@ -701,7 +708,8 @@ class _LabelEditorState extends State<_LabelEditorPage> {
 
   // ── Alignment helpers ────────────────────────────────────────────────────────
   int _elW(LabelElement el) => switch (el.type) {
-    ElType.bar  => el.barcodeWidth,
+    ElType.bar  => barcodePrintedWidth(el.barcodeType,
+        el.data.replaceAll(RegExp(r'\{[a-z]+\}'), '12345678'), el.barcodeWidth),
     ElType.qr   => el.qrSize * 16,
     ElType.box  => (el.xEnd - el.x).abs(),
     ElType.logo => el.logoWidthDots,
@@ -743,60 +751,105 @@ class _LabelEditorState extends State<_LabelEditorPage> {
 
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('Processing image…'), duration: Duration(seconds: 60)));
+    var ok = false;
     try {
-      final bytes   = await xfile.readAsBytes();
-      img.Image? src = img.decodeImage(bytes);
+      img.Image? src = img.decodeImage(await xfile.readAsBytes());
       if (src == null) throw Exception('Cannot decode image');
-
-      final wDots = el.logoWidthDots.clamp(8, 2400);
-      final hDots = el.logoHeightDots.clamp(8, 1600);
-      final resized = img.copyResize(src, width: wDots, height: hDots,
-          interpolation: img.Interpolation.linear);
-
-      // Save display copy to app documents/logos/
+      // Keep a copy of the original (capped at 1000 px) so the logo can be
+      // resized later without losing quality.
+      if (src.width > 1000 || src.height > 1000) {
+        src = src.width >= src.height
+            ? img.copyResize(src, width: 1000, interpolation: img.Interpolation.average)
+            : img.copyResize(src, height: 1000, interpolation: img.Interpolation.average);
+      }
       final dir     = await getApplicationDocumentsDirectory();
       final logoDir = Directory(p.join(dir.path, 'logos'));
       await logoDir.create(recursive: true);
       final file = File(p.join(logoDir.path, '${DateTime.now().millisecondsSinceEpoch}.png'));
-      await file.writeAsBytes(img.encodePng(resized));
+      await file.writeAsBytes(img.encodePng(src));
 
-      // Convert to TSPL BITMAP (1-bit per pixel, MSB first, white=0, black=1)
-      final wBytes = (wDots + 7) ~/ 8;
-      final sb = StringBuffer();
-      for (int row = 0; row < hDots; row++) {
-        int byteVal = 0, bitPos = 7;
-        for (int col = 0; col < wDots; col++) {
-          final px  = resized.getPixel(col, row);
-          final lum = (px.r.toInt() * 299 + px.g.toInt() * 587 + px.b.toInt() * 114) ~/ 1000;
-          if (lum < 128) byteVal |= (1 << bitPos);   // dark → black → bit=1
-          bitPos--;
-          if (bitPos < 0) {
-            sb.write(byteVal.toRadixString(16).padLeft(2, '0').toUpperCase());
-            byteVal = 0; bitPos = 7;
-          }
-        }
-        if (wDots % 8 != 0) {                          // flush last partial byte
-          sb.write(byteVal.toRadixString(16).padLeft(2, '0').toUpperCase());
-        }
+      // Start at a size that fits the label, keeping the image's shape.
+      final lw = _wMm * 8, lh = _hMm * 8;
+      var w = (lw / 3).round().clamp(16, lw);
+      if (src.height * w / src.width > lh - 8) {
+        w = ((lh - 8) * src.width / src.height).round().clamp(8, lw);
       }
-
-      if (mounted) setState(() {
-        el.logoPath      = file.path;
-        el.logoBmpHex    = sb.toString();
-        el.logoBmpW      = wBytes;
-        el.logoWidthDots = wDots;
-        el.logoHeightDots= hDots;
-        _inspKey = Object();
-      });
+      _encodeLogo(el, src, w);
+      el.logoPath = file.path;
+      ok = true;
+      if (mounted) setState(() => _inspKey = Object());
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Logo error: $e')));
     } finally {
       if (mounted) ScaffoldMessenger.of(context).clearSnackBars();
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(el.logoBmpHex.isEmpty ? 'Image pick failed' : 'Logo saved ✓'),
+          content: Text(ok ? 'Logo added — use the Size slider to make it smaller or bigger'
+              : 'Image pick failed'),
           duration: const Duration(seconds: 2)));
     }
+  }
+
+  /// Resizes a logo to [widthDots] wide, height following the image's shape.
+  /// The print dots are rebuilt from the original image, so the printout
+  /// really changes size (not just the preview).
+  Future<void> _resizeLogo(LabelElement el, int widthDots) async {
+    img.Image? src;
+    if (el.logoPath.isNotEmpty && File(el.logoPath).existsSync()) {
+      src = img.decodeImage(await File(el.logoPath).readAsBytes());
+    }
+    src ??= _bitmapToImage(el);     // template from another device: use its dots
+    if (src == null) return;
+    _encodeLogo(el, src, widthDots.clamp(8, _wMm * 8));
+    if (mounted) setState(() => _inspKey = Object());
+  }
+
+  /// The logo's own 1-bit dots as an image (for logos without a source file).
+  img.Image? _bitmapToImage(LabelElement el) {
+    final w = el.logoWidthDots, h = el.logoHeightDots, bpr = el.logoBmpW;
+    if (el.logoBmpHex.isEmpty || w <= 0 || h <= 0 || bpr <= 0) return null;
+    final out = img.Image(width: w, height: h);
+    img.fill(out, color: img.ColorRgb8(255, 255, 255));
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        final i = (y * bpr + (x >> 3)) * 2;
+        if (i + 2 > el.logoBmpHex.length) continue;
+        final b = int.tryParse(el.logoBmpHex.substring(i, i + 2), radix: 16) ?? 0;
+        if (b & (0x80 >> (x & 7)) != 0) out.setPixelRgb(x, y, 0, 0, 0);
+      }
+    }
+    return out;
+  }
+
+  /// Converts [src] to TSPL BITMAP data [wDots] wide (1 bit per dot, MSB
+  /// first, white=0, black=1); transparent pixels count as white.
+  void _encodeLogo(LabelElement el, img.Image src, int wDots) {
+    final hDots = (src.height * wDots / src.width).round().clamp(8, 1600);
+    final resized = img.copyResize(src, width: wDots, height: hDots,
+        interpolation: img.Interpolation.average);
+    final wBytes = (wDots + 7) ~/ 8;
+    final sb = StringBuffer();
+    for (int row = 0; row < hDots; row++) {
+      int byteVal = 0, bitPos = 7;
+      for (int col = 0; col < wDots; col++) {
+        final px  = resized.getPixel(col, row);
+        final lum = (px.r.toInt() * 299 + px.g.toInt() * 587 + px.b.toInt() * 114) ~/ 1000;
+        final opaque = resized.numChannels < 4 || px.a.toInt() >= 128;
+        if (opaque && lum < 128) byteVal |= (1 << bitPos);   // dark → black → bit=1
+        bitPos--;
+        if (bitPos < 0) {
+          sb.write(byteVal.toRadixString(16).padLeft(2, '0').toUpperCase());
+          byteVal = 0; bitPos = 7;
+        }
+      }
+      if (wDots % 8 != 0) {                          // flush last partial byte
+        sb.write(byteVal.toRadixString(16).padLeft(2, '0').toUpperCase());
+      }
+    }
+    el.logoBmpHex     = sb.toString();
+    el.logoBmpW       = wBytes;
+    el.logoWidthDots  = wDots;
+    el.logoHeightDots = hDots;
   }
 
   void _deleteSelected() {
@@ -955,6 +1008,7 @@ class _LabelEditorState extends State<_LabelEditorPage> {
           onInsertVar: _insertVar,
           onAlign: _align,
           onPickLogo: _pickAndProcessLogo,
+          onResizeLogo: _resizeLogo,
         ),
       ]),
     );
@@ -1171,13 +1225,14 @@ class _BottomPanel extends StatelessWidget {
   final ValueChanged<String> onInsertVar;
   final ValueChanged<String> onAlign;
   final void Function(LabelElement)? onPickLogo;
+  final void Function(LabelElement, int)? onResizeLogo;
 
   const _BottomPanel({
     required this.selected, required this.inspKey,
     required this.wMm, required this.hMm,
     required this.onFocusCtrl, required this.onChange,
     required this.onInsertVar, required this.onAlign,
-    this.onPickLogo,
+    this.onPickLogo, this.onResizeLogo,
   });
 
   @override Widget build(BuildContext context) {
@@ -1199,6 +1254,7 @@ class _BottomPanel extends StatelessWidget {
               onFocusCtrl: onFocusCtrl,
               onChange: onChange,
               onPickLogo: onPickLogo,
+              onResizeLogo: onResizeLogo,
             ),
             // ── Alignment toolbar ──────────────────────────────────────────
             Container(
@@ -1251,11 +1307,12 @@ class _PropertiesSection extends StatefulWidget {
   final ValueChanged<TextEditingController?> onFocusCtrl;
   final VoidCallback onChange;
   final void Function(LabelElement)? onPickLogo;
+  final void Function(LabelElement, int)? onResizeLogo;
 
   const _PropertiesSection({
     super.key, required this.el, required this.wMm, required this.hMm,
     required this.onFocusCtrl, required this.onChange,
-    this.onPickLogo,
+    this.onPickLogo, this.onResizeLogo,
   });
 
   @override State<_PropertiesSection> createState() => _PropertiesSectionState();
@@ -1493,6 +1550,26 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
                   hint: 'Item: {product}{nl}Net: {net}{nl}Serial: {serial}'),
               const SizedBox(height: 6),
               Row(children: [
+                const Text('Scan into Excel:', style: TextStyle(fontSize: 12)),
+                const SizedBox(width: 8),
+                SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  style: const ButtonStyle(visualDensity: VisualDensity.compact),
+                  segments: const [
+                    ButtonSegment(value: false, label: Text('Rows'),
+                        icon: Icon(Icons.table_rows_outlined, size: 16)),
+                    ButtonSegment(value: true, label: Text('Columns'),
+                        icon: Icon(Icons.view_column_outlined, size: 16)),
+                  ],
+                  selected: {_data.text.contains('{tab}')},
+                  onSelectionChanged: (s) =>
+                      setState(() => _data.text = qrScanLayout(_data.text, columns: s.first)),
+                ),
+              ]),
+              const Text('Columns: fields go side by side (Tab), next scan starts a new row',
+                  style: TextStyle(fontSize: 10, color: Colors.grey)),
+              const SizedBox(height: 6),
+              Row(children: [
                 _numRow('Size', el.qrSize, (v) => el.qrSize = v, mn: 1, mx: 10),
                 const SizedBox(width: 16),
                 _dpEcc(el.qrEcc, (v) => el.qrEcc = v ?? 'M'),
@@ -1503,15 +1580,66 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
               _tf('Barcode Data (use {variable} tokens)', _data, _dataFn,
                   hint: '{serial}'),
               const SizedBox(height: 6),
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Numbers only (Code 128-C)', style: TextStyle(fontSize: 13)),
+                subtitle: const Text('Fields print as digits (weight always 3 decimals). '
+                    'Type a separator like {serial}-{net} to keep them apart.',
+                    style: TextStyle(fontSize: 11)),
+                value: el.barcodeDigitsOnly,
+                onChanged: (v) {
+                  el.barcodeDigitsOnly = v;
+                  // Shorter content leaves room for thicker, easier-to-scan bars.
+                  if (el.barcodeBarDots == 0) el.barcodeBarDots = 2;
+                  final sample = barcodeSample(el.data, digitsOnly: v);
+                  el.barcodeWidth = el.barcodeBarDots * barcodeModules(el.barcodeType, sample);
+                  _sync();
+                },
+              ),
               SingleChildScrollView(scrollDirection: Axis.horizontal,
                 child: Row(children: [
                   _dpBarType(el.barcodeType, (v) => el.barcodeType = v ?? '128'),
                   const SizedBox(width: 16),
-                  _numRow('Width', el.barcodeWidth, (v) => el.barcodeWidth = v, mn: 40, mx: 600),
+                  Builder(builder: (_) {
+                    final sample = barcodeSample(el.data, digitsOnly: el.barcodeDigitsOnly);
+                    final m = barcodeModules(el.barcodeType, sample);
+                    final cur = el.barcodeBarDots > 0
+                        ? el.barcodeBarDots
+                        : barcodeNarrow(el.barcodeType, sample, el.barcodeWidth);
+                    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('Bar thickness', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                      DropdownButton<int>(
+                        value: cur.clamp(1, 4),
+                        isDense: true,
+                        items: [
+                          for (var n = 1; n <= 4; n++)
+                            DropdownMenuItem(value: n, child: Text(
+                                '$n dot${n > 1 ? 's' : ''} · ${(n * m / 8).toStringAsFixed(1)} mm'
+                                '${n == 1 ? ' (hard to scan)' : n == 2 ? ' (good)' : ''}',
+                                style: const TextStyle(fontSize: 12))),
+                        ],
+                        onChanged: (n) {
+                          if (n == null) return;
+                          el.barcodeBarDots = n;          // what prints
+                          el.barcodeWidth = n * m;        // for older app versions
+                          _sync();
+                        },
+                      ),
+                    ]);
+                  }),
                   const SizedBox(width: 12),
                   _numRow('Height', el.barcodeHeight, (v) => el.barcodeHeight = v, mn: 10, mx: 400),
                 ]),
               ),
+              Builder(builder: (_) {
+                final sample = barcodeSample(el.data, digitsOnly: el.barcodeDigitsOnly);
+                return Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('Prints like: $sample  (${sample.length} characters)',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                );
+              }),
             ]),
 
           ElType.box => SingleChildScrollView(scrollDirection: Axis.horizontal,
@@ -1552,16 +1680,39 @@ class _PropertiesSectionState extends State<_PropertiesSection> {
                       style: const TextStyle(fontSize: 10, color: Colors.grey)),
                 ],
               ]),
-              const SizedBox(height: 6),
-              SingleChildScrollView(scrollDirection: Axis.horizontal,
-                child: Row(children: [
-                  _numRow('W (dots)', el.logoWidthDots, (v) => el.logoWidthDots = v,
-                      mn: 8, mx: 2400),
-                  const SizedBox(width: 12),
-                  _numRow('H (dots)', el.logoHeightDots, (v) => el.logoHeightDots = v,
-                      mn: 8, mx: 1600),
+              if (el.logoBmpHex.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Row(children: [
+                  const Text('Size', style: TextStyle(fontSize: 12)),
+                  IconButton(
+                    tooltip: 'Smaller',
+                    icon: const Icon(Icons.remove_circle_outline),
+                    onPressed: () => widget.onResizeLogo?.call(
+                        el, (el.logoWidthDots * 0.85).round()),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: el.logoWidthDots.clamp(8, widget.wMm * 8).toDouble(),
+                      min: 8,
+                      max: (widget.wMm * 8).toDouble(),
+                      onChanged: (v) => setState(() => el.logoWidthDots = v.round()),
+                      // Rebuild the print dots once, when the finger lifts.
+                      onChangeEnd: (v) => widget.onResizeLogo?.call(el, v.round()),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Bigger',
+                    icon: const Icon(Icons.add_circle_outline),
+                    onPressed: () => widget.onResizeLogo?.call(
+                        el, (el.logoWidthDots * 1.15).round()),
+                  ),
                 ]),
-              ),
+                Text('${(el.logoWidthDots / 8).toStringAsFixed(1)} × '
+                    '${(el.logoHeightDots / 8).toStringAsFixed(1)} mm'
+                    '${el.logoHeightDots > widget.hMm * 8 ? '  — taller than the label!' : ''}',
+                    style: TextStyle(fontSize: 11,
+                        color: el.logoHeightDots > widget.hMm * 8 ? Colors.red : Colors.grey)),
+              ],
             ]),
         },
       ]),

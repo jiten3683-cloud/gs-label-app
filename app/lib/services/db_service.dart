@@ -10,6 +10,8 @@ class DbService {
 
   /// Incremented whenever templates are created, updated, or deleted.
   final templateVersion = ValueNotifier<int>(0);
+  // Bumped on every new print record so open lists (Reports) can refresh.
+  final printsVersion   = ValueNotifier<int>(0);
 
   Future<void> init() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -338,7 +340,11 @@ class DbService {
 
   // ── Prints ───────────────────────────────────────────────────────────────────
 
-  Future<int> logPrint(Map<String, dynamic> row) => _db.insert('prints', row);
+  Future<int> logPrint(Map<String, dynamic> row) async {
+    final id = await _db.insert('prints', row);
+    printsVersion.value++;
+    return id;
+  }
 
   /// Advanced filtered query.
   /// [search] matches against serial, product, barcode, qr_data (any contains).
@@ -479,7 +485,25 @@ class DbService {
     if (startFrom < 1) startFrom = 1;
     await setSetting('serial_start',   startFrom.toString());
     await setSetting('serial_counter', (startFrom - 1).toString());
+    // The ESP32 keeps its own copy for button/auto prints and normally only
+    // moves it forward; this flag makes the next device sync push the reset.
+    await setSetting('serial_reset_pending', '1');
   }
+
+  /// Last serial number used (0 if none yet). Read-only.
+  Future<int> serialCounter() async =>
+      int.tryParse(await getSetting('serial_counter', def: '0')) ?? 0;
+
+  /// Move the counter forward to [n] — used when the ESP32 printed labels on
+  /// its own (button/auto print). Never moves it backwards.
+  Future<void> raiseSerialCounter(int n) async {
+    if (n > await serialCounter()) await setSetting('serial_counter', n.toString());
+  }
+
+  /// True if a print record with this serial already exists.
+  Future<bool> hasPrintSerial(String serial) async =>
+      (await _db.query('prints', columns: ['id'], where: 'serial=?',
+          whereArgs: [serial], limit: 1)).isNotEmpty;
 
   // ── Settings ─────────────────────────────────────────────────────────────────
 

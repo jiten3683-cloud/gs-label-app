@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import 'services/ble_service.dart';
 import 'services/db_service.dart';
+import 'services/device_link.dart';
 import 'services/license_service.dart';
 import 'services/theme_service.dart';
 import 'pages/home_shell.dart';
@@ -31,10 +32,14 @@ void main() async {
     await db.setSetting('print_direction', '1');
   }
 
+  final ble  = BleService();
+  final link = DeviceLink(db, ble);
+
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => BleService()),
+        ChangeNotifierProvider.value(value: ble),
+        ChangeNotifierProvider.value(value: link),
         Provider<DbService>.value(value: db),
         Provider<LicenseService>.value(value: license),
         ChangeNotifierProvider.value(value: theme),

@@ -63,7 +63,8 @@ class LabelCanvas extends StatelessWidget {
   /// Renders a single element map at the given canvas scale.
   /// Public so that other widgets (e.g. WYSIWYG element previews) can reuse it.
   static Widget renderEl(Map<String, dynamic> el, double scale) {
-    final type = el['type'] as String? ?? '';
+    // A QR sent as a bitmap (see qrBitmap) still previews as a QR.
+    final type = el['qr'] == 1 ? 'qr' : el['type'] as String? ?? '';
     switch (type) {
       case 'text':
         final font   = el['font'] as String? ?? '3';

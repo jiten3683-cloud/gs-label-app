@@ -44,6 +44,15 @@ class BleService extends ChangeNotifier {
   int    scaleDecimals = 3;    // digits after the decimal point in the raw string
   DateTime? lastSeen;
 
+  // Auto-print state the ESP32 reported in its last sync reply; null until a
+  // reply arrives (not synced yet, or firmware too old to support auto print).
+  bool? deviceAutoOn;
+
+  // JSON messages from the ESP32 that carry data rather than a status line:
+  // 'rec' (a label the button/auto print produced) and 'sync' (reply to sync).
+  final _deviceEvents = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get deviceEvents => _deviceEvents.stream;
+
   BleService() {
     // Auto-connect when Bluetooth adapter turns on (e.g. user enables BT after opening app)
     _adapterSub = FlutterBluePlus.adapterState.listen((state) {
@@ -61,6 +70,7 @@ class BleService extends ChangeNotifier {
   @override
   void dispose() {
     _adapterSub?.cancel();
+    _deviceEvents.close();
     super.dispose();
   }
 
@@ -144,6 +154,7 @@ class BleService extends ChangeNotifier {
     _connSub = d.connectionState.listen((state) {
       if (state == BluetoothConnectionState.disconnected && isConnected) {
         isConnected = false;
+        deviceAutoOn = null;
         lastStatus  = 'Disconnected – reconnecting…';
         notifyListeners();
         _scheduleReconnect();
@@ -197,6 +208,7 @@ class BleService extends ChangeNotifier {
     await _device?.disconnect();
     _device       = null;
     isConnected   = false;
+    deviceAutoOn  = null;
     isReconnecting = false;
     lastStatus    = '';
     notifyListeners();
@@ -220,6 +232,13 @@ class BleService extends ChangeNotifier {
   void _onStatus(List<int> data) {
     try {
       final j = jsonDecode(utf8.decode(data)) as Map<String, dynamic>;
+      final st = j['status'];
+      if (st == 'rec' || st == 'sync') {
+        if (st == 'sync') deviceAutoOn = j['auto'] == 1;
+        _deviceEvents.add(j);
+        notifyListeners();
+        return;
+      }
       lastStatus = '${j['status']}: ${j['msg']}';
       notifyListeners();
     } catch (_) {}
@@ -241,12 +260,41 @@ class BleService extends ChangeNotifier {
   }
 
   Future<void> tare()  => _send({'cmd': 'tare'});
+  Future<void> sync(Map<String, dynamic> p) => _send({'cmd': 'sync', ...p});
   Future<void> zero()  => _send({'cmd': 'zero'});
   Future<void> feed([int mm = 5]) => _send({'cmd': 'feed', 'mm': mm});
 
   Future<bool> sendPrintJob(Map<String, dynamic> job) async {
     if (!isConnected || _command == null) return false;
-    await _send(job);
+    await _send(_fixBitmaps(job));
     return true;
+  }
+
+  /// Bitmaps (logos, and QRs holding Tab/Enter) are stored 1 = black, MSB
+  /// first. Matched against photos of printed labels (2026-09-30), the TSC
+  /// reads BITMAP bytes MSB first with bit 0 = BLACK, and the ESP32
+  /// bit-reverses every byte (on dir 1 it also reverses byte order, which
+  /// together is an exact mirror). Sent as stored, a QR came out unreadable
+  /// and a logo's unused edge dots printed as a solid line. So every bitmap
+  /// goes inverted, and on dir 0 pre-reversed too, which works with every
+  /// firmware version (the firmware's own QR drawing already matches).
+  static Map<String, dynamic> _fixBitmaps(Map<String, dynamic> job) {
+    final label = job['label'];
+    final els = job['elements'];
+    if (label is! Map || els is! List) return job;
+    if (!els.any((e) => e is Map && e['bmp'] is String)) return job;
+    final flip = label['dir'] != 1;
+    final copy = jsonDecode(jsonEncode(job)) as Map<String, dynamic>;
+    for (final e in (copy['elements'] as List).whereType<Map>()) {
+      if (e['bmp'] is! String) continue;
+      final hex = e['bmp'] as String, sb = StringBuffer();
+      for (var i = 0; i + 1 < hex.length; i += 2) {
+        var b = ~int.parse(hex.substring(i, i + 2), radix: 16) & 0xFF, r = b;
+        if (flip) { r = 0; for (var k = 0; k < 8; k++) { r = (r << 1) | (b & 1); b >>= 1; } }
+        sb.write(r.toRadixString(16).padLeft(2, '0').toUpperCase());
+      }
+      e['bmp'] = sb.toString();
+    }
+    return copy;
   }
 }

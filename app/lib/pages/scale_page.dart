@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import '../services/ble_service.dart';
 import '../services/db_service.dart';
+import '../services/device_link.dart';
 import '../models/label_element.dart';
 import '../widgets/label_canvas.dart';
 
@@ -56,24 +57,30 @@ int _wtTypeFrom(Map m) {
   return 0;
 }
 
-// Resolve all {variables} in a string from a LabelContext
-String _resolveCtx(String s, LabelContext ctx) => s
+// Tokens the ESP32 re-fills on button/auto prints (see LabelElement.toJson).
+final _liveTokens =
+    RegExp(r'\{(net|gross|tare|metal|amount|making|serial|date|time)\}');
+
+// Resolve all {variables} in a string from a LabelContext.
+// keepLive leaves the live tokens in place for an element's 'tpl'.
+String _resolveCtx(String s, LabelContext ctx, {bool keepLive = false}) =>
+    (keepLive ? s : s
     .replaceAll('{net}',      ctx.netStr)
     .replaceAll('{gross}',    ctx.grossStr)
     .replaceAll('{tare}',     ctx.tareStr)
-    .replaceAll('{stone}',    ctx.stoneStr)
     .replaceAll('{metal}',    ctx.metalStr)
+    .replaceAll('{amount}',   ctx.amountStr)
+    .replaceAll('{making}',   ctx.makingStr)
     .replaceAll('{serial}',   ctx.serial)
     .replaceAll('{date}',     ctx.dateStr)
-    .replaceAll('{time}',     ctx.timeStr)
+    .replaceAll('{time}',     ctx.timeStr))
+    .replaceAll('{stone}',    ctx.stoneStr)
     .replaceAll('{product}',  ctx.product)
     .replaceAll('{purity}',   ctx.purity)
     .replaceAll('{hsn}',      ctx.hsn)
     .replaceAll('{category}', ctx.category)
     .replaceAll('{code}',     ctx.code)
     .replaceAll('{rate}',     ctx.rateStr)
-    .replaceAll('{amount}',   ctx.amountStr)
-    .replaceAll('{making}',   ctx.makingStr)
     .replaceAll('{shop}',     ctx.shopName)
     .replaceAll('{company}',  ctx.companyName)
     .replaceAll('{address}',  ctx.companyAddress)
@@ -143,7 +150,20 @@ class _ScalePageState extends State<ScalePage> {
       context.read<DbService>().templateVersion.addListener(_loadTemplates);
       // Capture raw scale diagnostic strings from BLE status notifications
       context.read<BleService>().addListener(_onBleUpdate);
+      context.read<DeviceLink>().addListener(_onDeviceUpdate);
     });
+  }
+
+  // The ESP32 printed a label on its own (button/auto) or synced its serial
+  // counter — either way the next-serial preview may have moved.
+  String _lastDeviceSerial = '';
+  void _onDeviceUpdate() {
+    final link = context.read<DeviceLink>();
+    _refreshNextSerial();
+    if (link.lastSerial.isNotEmpty && link.lastSerial != _lastDeviceSerial) {
+      _lastDeviceSerial = link.lastSerial;
+      _toast('${link.lastSource == 'auto' ? 'Auto' : 'Button'} print ${link.lastSerial} saved');
+    }
   }
 
   void _onBleUpdate() {
@@ -157,6 +177,7 @@ class _ScalePageState extends State<ScalePage> {
   @override void dispose() {
     context.read<DbService>().templateVersion.removeListener(_loadTemplates);
     context.read<BleService>().removeListener(_onBleUpdate);
+    context.read<DeviceLink>().removeListener(_onDeviceUpdate);
     for (final c in [_productCtrl, _purityCtrl, _hsnCtrl, _rateCtrl, _makingCtrl,
         _copiesCtrl, _stoneCtrl, _manGrossCtrl, _manTareCtrl,
         _appTareCtrl, _qp1Ctrl, _qp2Ctrl, _qp3Ctrl]) c.dispose();
@@ -324,9 +345,11 @@ class _ScalePageState extends State<ScalePage> {
     for (final raw in lines) {
       if (y + fontH > hDots) break;
       if (raw.trim().isEmpty) { y += step ~/ 2; continue; }
+      final line = _expandDots(raw, wMm);
       elems.add({'type': 'text', 'x': 8 + leftDots, 'y': y, 'font': font,
           'xs': 1, 'ys': 1, 'rot': 0,
-          'text': _resolveCtx(_expandDots(raw, wMm), ctx)});
+          'text': _resolveCtx(line, ctx),
+          if (_liveTokens.hasMatch(line)) 'tpl': _resolveCtx(line, ctx, keepLive: true)});
       y += step;
     }
     return elems;
@@ -350,6 +373,8 @@ class _ScalePageState extends State<ScalePage> {
           bold: isBold,
           data: m['data'] ?? '', barcodeType: m['btype'] ?? '128',
           barcodeHeight: m['bh'] ?? 60, barcodeWidth: m['bw'] ?? 120,
+          barcodeDigitsOnly: m['dig'] == true,
+          barcodeBarDots: (m['bn'] as num?)?.toInt() ?? 0,
           qrEcc: m['ecc'] ?? 'M', qrSize: m['qs'] ?? 4,
           xEnd: m['xe'] ?? 100, yEnd: m['ye'] ?? 100, thickness: m['th'] ?? 2,
           logoName: m['logo'] ?? 'LOGO.BMP',
@@ -525,6 +550,7 @@ class _ScalePageState extends State<ScalePage> {
     final suffix   = await db.getSetting('serial_suffix', def: '');
     final padLen   = int.tryParse(await db.getSetting('serial_pad', def: '5')) ?? 5;
     final serial   = await db.nextSerial(prefix, padLen: padLen, suffix: suffix);
+    final serialNo = await db.serialCounter();
     final ctx      = _buildCtx(serial);
     final elements = _resolveTemplate(tplRow, ctx);
 
@@ -544,6 +570,17 @@ class _ScalePageState extends State<ScalePage> {
       // Extra-zero padding travels with the job so a physical-button reprint on
       // the ESP32 formats the live weight the same way the app just did.
       'xz': _extraZero ? 1 : 0,
+      // Everything the ESP32 needs to print this template again by itself
+      // (physical button / auto print) with live values:
+      //   sn    — serial format + number; the ESP32 continues the sequence
+      //   wu    — weight unit suffix, stone/rate/mk — for metal/making/amount
+      //   dt    — date/time fallback until the next sync sets the ESP32 clock
+      //   tr    — the tare this label was printed with (incl. one typed in)
+      'sn': {'v': serial, 'n': serialNo, 'p': prefix, 'w': padLen, 's': suffix},
+      'wu': _unit == 'None' ? '' : _unit,
+      'stone': _stoneG, 'rate': _rate, 'mk': _making,
+      'dt': {'d': ctx.dateStr, 't': ctx.timeStr},
+      if (!_manualMode) 'tr': _appTareG,
       'elements': elements,
     };
 
@@ -564,8 +601,8 @@ class _ScalePageState extends State<ScalePage> {
     String barcodeData = '';
     String qrData = '';
     for (final el in elements) {
-      if (el['type'] == 'barcode' && barcodeData.isEmpty) barcodeData = el['data'] as String? ?? '';
-      if (el['type'] == 'qr'      && qrData.isEmpty)      qrData      = el['data'] as String? ?? '';
+      if (el['type'] == 'bar'     && barcodeData.isEmpty) barcodeData = el['data'] as String? ?? '';
+      if ((el['type'] == 'qr' || el['qr'] == 1) && qrData.isEmpty) qrData = el['data'] as String? ?? '';
     }
 
     await db.logPrint({
@@ -581,6 +618,12 @@ class _ScalePageState extends State<ScalePage> {
       'ts': DateTime.now().millisecondsSinceEpoch, 'template': tplRow['name'],
       'job_snapshot': jsonEncode(job),  // full resolved job for report preview/reprint
     });
+    // What button/auto print records need that the ESP32 does not send back.
+    await db.setSetting('last_print_base', jsonEncode({
+      'product': _productCtrl.text, 'purity': _purityCtrl.text, 'hsn': _hsnCtrl.text,
+      'rate': _rate, 'making': _making, 'operator': _shopName,
+      'template': tplRow['name'], 'job': job,
+    }));
     _refreshNextSerial();
   }
 
@@ -609,6 +652,9 @@ class _ScalePageState extends State<ScalePage> {
         'label': {'w': wMm, 'h': hMm, 'gap': gap, 'dir': int.tryParse(dirStr2) ?? 1},
         'copies': 1, 'elements': elems};
     final sent = await ble.sendPrintJob(job);
+    // The ESP32 now reprints this quick label on button/auto print; records
+    // for those carry no product/template details.
+    await db.setSetting('last_print_base', jsonEncode({'template': 'Quick print', 'job': job}));
     if (!sent) {
       await db.enqueuePrint(job, labelInfo: lines.first);
       await _refreshQueueCount();
@@ -635,6 +681,27 @@ class _ScalePageState extends State<ScalePage> {
               onSelected: (_) => setState(() => _manualMode = true)),
         ]),
         const SizedBox(height: 8),
+
+        // ── Auto print notice (state as confirmed by the ESP32) ─────────────
+        if (ble.isConnected && ble.deviceAutoOn == true) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.green.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.green),
+            ),
+            child: const Row(children: [
+              Icon(Icons.bolt, color: Colors.green, size: 20),
+              SizedBox(width: 8),
+              Expanded(child: Text(
+                'AUTO PRINT ON — place the item; the label prints when the weight '
+                'is stable. Remove it before the next item.',
+                style: TextStyle(fontSize: 12))),
+            ]),
+          ),
+          const SizedBox(height: 8),
+        ],
 
         // ── Weight display ──────────────────────────────────────────────────
         _manualMode

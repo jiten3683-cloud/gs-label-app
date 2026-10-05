@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 
 import '../services/ble_service.dart';
 import '../services/db_service.dart';
+import '../services/device_link.dart';
 import '../services/theme_service.dart';
 import 'products_page.dart';
 
@@ -30,6 +32,8 @@ class _SettingsPageState extends State<SettingsPage> {
   String _defaultUnit     = 'g';
   int    _printDirection  = 1;   // 0 = Normal, 1 = Rotated 180°
   bool   _extraZero       = false; // pad one extra trailing zero on weights
+  bool   _autoPrint       = false; // ESP32 prints by itself on stable weight
+  final _autoMinCtrl      = TextEditingController(text: '0.050');
   bool   _loading         = true;
 
   static const _units = ['g', 'mg', 'Tola', 'Carat', 'Kg', 'None'];
@@ -44,6 +48,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _gapCtrl.dispose(); _darknessCtrl.dispose();
     _topMarginCtrl.dispose(); _leftMarginCtrl.dispose();
     _bleNameCtrl.dispose();
+    _autoMinCtrl.dispose();
     super.dispose();
   }
 
@@ -68,6 +73,8 @@ class _SettingsPageState extends State<SettingsPage> {
     _defaultUnit           = s['default_unit']     ?? 'g';
     _printDirection        = int.tryParse(s['print_direction'] ?? '1') ?? 1;
     _extraZero             = (s['weight_extra_zero'] ?? '0') == '1';
+    _autoPrint             = (s['auto_print'] ?? '0') == '1';
+    _autoMinCtrl.text      = s['auto_min_wt'] ?? '0.050';
     if (!_units.contains(_defaultUnit)) _defaultUnit = 'g';
     setState(() => _loading = false);
   }
@@ -99,6 +106,8 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     if (ok != true || !mounted) return;
     await db.resetSerialCounter(start);
+    // The ESP32 continues the same sequence for button/auto prints.
+    if (mounted) await context.read<DeviceLink>().sync();
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Serial counter reset — next will be $preview')));
   }
@@ -125,8 +134,14 @@ class _SettingsPageState extends State<SettingsPage> {
       'default_unit':    _defaultUnit,
       'print_direction': _printDirection.toString(),
       'weight_extra_zero': _extraZero ? '1' : '0',
+      'auto_print':  _autoPrint ? '1' : '0',
+      'auto_min_wt': ((double.tryParse(_autoMinCtrl.text) ?? 0) > 0
+          ? _autoMinCtrl.text.trim() : '0.050'),
     };
     for (final e in entries.entries) await db.setSetting(e.key, e.value);
+    // Auto print runs on the ESP32 — push the change now if connected,
+    // otherwise it goes out on the next connect.
+    if (mounted) await context.read<DeviceLink>().sync();
     ble.deviceName = _bleNameCtrl.text.trim().isNotEmpty
         ? _bleNameCtrl.text.trim() : 'GS-LABEL-BRIDGE';
     if (mounted) {
@@ -236,6 +251,43 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                   onChanged: (v) => setState(() => _printDirection = v ?? 0),
                 ),
+              ]),
+              const SizedBox(height: 16),
+
+              // ── Auto Print ──────────────────────────────────────────────────
+              _section('Auto Print', [
+                SwitchListTile(
+                  value: _autoPrint,
+                  onChanged: (v) => setState(() => _autoPrint = v),
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.bolt),
+                  title: const Text('Auto Print on Stable Weight'),
+                  subtitle: Text(_autoPrint
+                      ? 'On — put an item on the scale; when the weight is stable '
+                        'the last printed template prints by itself. Remove the '
+                        'item before the next one.'
+                      : 'Off — print with the app or the physical button'),
+                ),
+                _field(_autoMinCtrl, 'Minimum Weight', Icons.scale_outlined,
+                    type: const TextInputType.numberWithOptions(decimal: true),
+                    hint: 'Only weights at or above this print (same unit as the scale)'),
+                Builder(builder: (ctx) {
+                  final ble = ctx.watch<BleService>();
+                  final String msg;
+                  if (!ble.isConnected) {
+                    msg = 'Printer not connected — applied on next connect.';
+                  } else if (ble.deviceAutoOn == null) {
+                    msg = 'Printer has not confirmed — update the ESP32 firmware '
+                          'if this stays.';
+                  } else {
+                    msg = 'Printer: auto print ${ble.deviceAutoOn! ? 'ON' : 'OFF'}';
+                  }
+                  return Text(msg, style: TextStyle(fontSize: 12, color: Colors.grey.shade600));
+                }),
+                const SizedBox(height: 4),
+                Text('Every label from auto print or the physical button gets the next '
+                     'serial number and is saved in Reports when the app is connected.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
               ]),
               const SizedBox(height: 16),
 
@@ -380,10 +432,16 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 16),
 
               // ── App Version ─────────────────────────────────────────────────
+              // Read from the installed app, so it always matches the real build.
               Center(
-                child: Text(
-                  'GS Label Printer  v1.0.2 (build 4)',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                child: FutureBuilder<PackageInfo>(
+                  future: PackageInfo.fromPlatform(),
+                  builder: (_, snap) => Text(
+                    snap.hasData
+                        ? 'GS Label Printer  v${snap.data!.version} (build ${snap.data!.buildNumber})'
+                        : 'GS Label Printer',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                  ),
                 ),
               ),
               const SizedBox(height: 24),

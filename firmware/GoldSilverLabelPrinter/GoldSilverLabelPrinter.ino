@@ -30,6 +30,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <Preferences.h>    // NVS persistent storage for offline template
+#include <qrcode.h>         // esp_qrcode: draws QRs holding Tab/Enter as bitmaps
 
 // ── Pin map ──────────────────────────────────────────────────────────────────
 #define SCALE_RX_PIN   16    // UART1 RX  ← scale (via MAX3232) — GPIO16
@@ -70,6 +71,39 @@ String        cmdBuffer = "";
 
 // Last complete print-job JSON — used by button to reprint
 String lastPrintJson = "";
+
+// Serial number: the last number used. App prints set it (from the job's "sn"),
+// button and auto prints advance it, so all three share one running sequence.
+uint32_t snLast     = 0;        // NVS "snN"
+
+// Wall clock from the app (local-time epoch seconds, set by "sync" on every
+// connect), carried forward with millis(). 0 until the app has connected since
+// power-on — the ESP32 has no RTC. Print jobs don't set it: a reprint from
+// Reports or the offline queue carries an old time.
+uint32_t clockEpoch = 0;
+uint32_t clockAtMs  = 0;
+
+// Auto print (Settings → Auto Print in the app)
+bool     autoOn       = false;  // NVS "auto"
+float    autoMin      = 0.05f;  // NVS "autoMin" — minimum net, raw scale unit
+bool     autoArmed    = false;  // pan must drop below autoMin/2 between items
+uint32_t autoStableMs = 0;
+
+// What a live print actually put on the label — reported to the app so the
+// record matches the printed label exactly.
+struct LiveValues {
+  String   serial;
+  uint32_t serialNo = 0;
+  float    gross = 0, tare = 0, net = 0, stone = 0, metal = 0;
+  float    amount = 0, making = 0;
+  uint8_t  dec = 3;
+  String   unit, date, time;
+};
+
+// Button/auto print records waiting for the app to reconnect (RAM only)
+#define REC_PENDING_MAX 30
+String  recPending[REC_PENDING_MAX];
+uint8_t recPendN = 0;
 
 // Scale state
 // `value` is the number EXACTLY as the scale sent it — never unit-converted.
@@ -152,14 +186,68 @@ void tsplText(int x, int y, const String& font, int rot,
                 x, y, font.c_str(), rot, xm, ym, text.c_str());
 }
 
+
+
+// esp_qrcode_generate() hands the finished symbol to a callback with no user
+// pointer, so the drawing parameters travel in these.
+static int qbX, qbY, qbCell, qbRot;
+
+static void qrBitmapDraw(esp_qrcode_handle_t qr) {
+  const int n = esp_qrcode_get_size(qr);
+  const int dots = n * qbCell;
+  const int bw = (dots + 7) / 8;
+  // Rotation turns the symbol about its anchor the way QRCODE does, so the
+  // anchor moves to the corner that ends up top-left.
+  int x = qbX, y = qbY;
+  if (qbRot == 90 || qbRot == 180) x -= dots;
+  if (qbRot == 180 || qbRot == 270) y -= dots;
+  x = max(0, x); y = max(0, y);
+  Serial.printf("BITMAP %d,%d,%d,%d,0,", x, y, bw, dots);
+  for (int py = 0; py < dots; py++) {
+    for (int b = 0; b < bw; b++) {
+      uint8_t v = 0;
+      for (int bit = 0; bit < 8; bit++) {
+        int px = b * 8 + bit;
+        if (px >= dots) break;
+        int mx = px / qbCell, my = py / qbCell, sx = mx, sy = my;
+        if      (qbRot == 90)  { sx = my;         sy = n - 1 - mx; }
+        else if (qbRot == 180) { sx = n - 1 - mx; sy = n - 1 - my; }
+        else if (qbRot == 270) { sx = n - 1 - my; sy = mx; }
+        if (esp_qrcode_get_module(qr, sx, sy)) v |= 0x80 >> bit;
+      }
+      // The TSC reads BITMAP bytes MSB first with bit 0 = black (checked
+      // against printed labels 2026-09-30); rotation is already in the matrix.
+      Serial.write((uint8_t)~v);
+    }
+  }
+  Serial.print("\r\n");
+}
+
+// Draws the QR for [d] and prints it as a BITMAP, [cell] dots per module.
+void qrBitmap(int x, int y, const String& ecc, int cell, int rot, const String& d) {
+  qbX = x; qbY = y; qbCell = constrain(cell, 1, 10); qbRot = rot;
+  esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
+  cfg.display_func = qrBitmapDraw;
+  cfg.max_qrcode_version = 20;
+  cfg.qrcode_ecc_level = ecc == "L" ? ESP_QRCODE_ECC_LOW  : ecc == "Q" ? ESP_QRCODE_ECC_QUART
+                       : ecc == "H" ? ESP_QRCODE_ECC_HIGH : ESP_QRCODE_ECC_MED;
+  esp_qrcode_generate(&cfg, d.c_str());
+}
+
 void tsplQR(int x, int y, const String& ecc, int cell,
             const String& mode, int rot, const String& data) {
-  // A raw CR/LF would end the TSPL command mid-string. TSPL's QRCODE escapes
-  // \[R] and \[L] put real CR/LF bytes into the QR instead, so the
-  // scanned text keeps its line breaks.
+  // Line breaks ({nl}) and tabs ({tab}) let a keyboard-mode scanner press
+  // Enter / Tab between fields. The TSC printer strips TAB from QRCODE text
+  // in every mode (manual "B" segments included) and turns the \[R]/\[L]
+  // escapes into CR+LF plus a repeated character, so such a QR is drawn here
+  // and sent as a BITMAP instead. Every line break becomes ONE CR: scanners
+  // press Enter for CR and again for LF, so CR+LF left a blank row in Excel.
   String d = data;
-  d.replace("\r", "\\[R]");
-  d.replace("\n", "\\[L]");
+  d.replace("\r\n", "\r");
+  d.replace("\n", "\r");
+  for (unsigned i = 0; i < d.length(); i++) {
+    if ((uint8_t)d[i] < 0x20) { qrBitmap(x, y, ecc, cell, rot, d); return; }
+  }
   Serial.printf("QRCODE %d,%d,%s,%d,%s,%d,\"%s\"\r\n",
                 x, y, ecc.c_str(), cell, mode.c_str(), rot, d.c_str());
 }
@@ -230,6 +318,10 @@ void executePrintJob(JsonDocument& doc) {
 
   for (JsonObject e : doc["elements"].as<JsonArray>()) {
     String type = e["type"] | "";
+    // App >= 2026-09-30 sends a QR holding Tab/Enter as a ready bitmap
+    // ('logo' + 'qr': 1). Without its picture (live print, or stripped for
+    // NVS) it is drawn here from 'data'.
+    if (type == "logo" && (e["qr"] | 0) && !e["bmp"].is<const char*>()) type = "qr";
     int x = e["x"] | 0;
     int y = e["y"] | 0;
 
@@ -372,6 +464,11 @@ void _sendOrientationTest(uint8_t dir) {
 // ============================================================================
 //  Command dispatcher
 // ============================================================================
+void setClock(JsonDocument& doc) {
+  uint32_t now = doc["now"] | 0;
+  if (now > 1600000000UL) { clockEpoch = now; clockAtMs = millis(); }
+}
+
 void handleCommand(const String& payload) {
   DynamicJsonDocument doc(4096);
   DeserializationError err = deserializeJson(doc, payload);
@@ -383,9 +480,46 @@ void handleCommand(const String& payload) {
   String cmd = doc["cmd"] | "";
 
   if (cmd == "print") {
+    // Never step the sequence backwards — a reprint from Reports carries an
+    // old number. A deliberate reset arrives through "sync" instead.
+    uint32_t n = doc["sn"]["n"] | 0;
+    if (n > snLast) { snLast = n; prefs.putULong("snN", snLast); }
+    // Button/auto prints must net off the same tare the app just printed with,
+    // including one typed into the app by hand.
+    if (doc.containsKey("tr")) tareGrams = doc["tr"] | 0.0f;
+    disarmAutoPrint();
     lastPrintJson = payload;   // save in RAM for immediate button reprint
     savePrintJobToNvs(payload); // persist to NVS for power-cycle survival
     executePrintJob(doc);
+
+  } else if (cmd == "sync") {
+    // Sent by the app on every connect and whenever Settings are saved.
+    setClock(doc);
+    if (doc.containsKey("auto")) {
+      autoOn = (doc["auto"] | 0) != 0;
+      prefs.putBool("auto", autoOn);
+    }
+    if (doc.containsKey("min")) {
+      autoMin = doc["min"] | 0.05f;
+      if (autoMin <= 0) autoMin = 0.001f;
+      prefs.putFloat("autoMin", autoMin);
+    }
+    if (doc.containsKey("sn")) {
+      // Normally keep the higher counter; "force" is the app's serial reset.
+      uint32_t n = doc["sn"] | 0;
+      if ((doc["force"] | 0) || n > snLast) { snLast = n; prefs.putULong("snN", snLast); }
+    }
+    StaticJsonDocument<96> r;
+    r["status"] = "sync";
+    r["sn"]     = snLast;
+    r["auto"]   = autoOn ? 1 : 0;
+    r["ms"]     = millis();
+    char out[96];
+    size_t len = serializeJson(r, out, sizeof(out));
+    pCharStatus->setValue((uint8_t*)out, len);
+    pCharStatus->notify();
+    delay(40);
+    flushPrintRecords();   // labels printed while the app was away
 
   } else if (cmd == "tare") {
     tareGrams = latest.value;
@@ -467,54 +601,122 @@ void savePrintJobToNvs(const String& jsonStr) {
 }
 
 // ============================================================================
-//  Button reprint — with live-weight substitution for weight-tagged elements.
+//  Live print — the physical button and auto print both reprint the stored
+//  template with the live weight and the next serial number, then report the
+//  label to the app so it is saved in the print records.
 //  Priority: RAM lastPrintJson → NVS stored job → hardcoded test print.
 // ============================================================================
-void buttonReprint() {
-  digitalWrite(PRINT_LED_PIN, HIGH); delay(80); digitalWrite(PRINT_LED_PIN, LOW);
 
-  String jobStr = lastPrintJson;
-  if (jobStr.isEmpty()) {
-    jobStr = prefs.getString("lastJob", "");
-  }
-  if (jobStr.isEmpty()) {
-    sendTestPrint();
-    return;
-  }
+String formatSerial(JsonObject sn, uint32_t n) {
+  char num[16];
+  snprintf(num, sizeof(num), "%0*lu", (int)(sn["w"] | 5), (unsigned long)n);
+  return String(sn["p"] | "") + num + String(sn["s"] | "");
+}
 
-  DynamicJsonDocument doc(8192);
-  if (deserializeJson(doc, jobStr) != DeserializationError::Ok) {
-    sendTestPrint();
-    return;
-  }
-
-  // ── Substitute live weight into elements tagged with wt_var ────────────────
-  float netG = latest.value - tareGrams;
-  if (netG < 0) netG = 0;
-
+// Fill the live values into every element of a stored job:
+//   - elements with 'tpl' (text/QR/barcode/serial/date written with {tokens})
+//   - weight elements tagged with 'wt_var'
+// Every live print consumes the next serial number: app, button and auto
+// prints all share one running sequence.
+void fillLiveJob(JsonDocument& doc, LiveValues& lv) {
   // "Extra zero" setting from the app: pad one more decimal place so 200.20
   // prints as 200.200. Cosmetic only — the value is unchanged.
-  uint8_t dec = latest.decimals + ((doc["xz"] | 0) ? 1 : 0);
+  lv.dec   = latest.decimals + ((doc["xz"] | 0) ? 1 : 0);
+  lv.gross = latest.value;
+  lv.tare  = tareGrams;
+  lv.net   = max(0.0f, latest.value - tareGrams);
+  // metal = live net − the stone deduction the operator entered in the app.
+  lv.stone = doc["stone"] | 0.0f;
+  lv.metal = max(0.0f, lv.net - lv.stone);
+  float rate = doc["rate"] | 0.0f;
+  float mk   = doc["mk"]   | 0.0f;
+  lv.making = lv.metal * rate * mk / 100.0f;
+  lv.amount = lv.metal * rate + lv.making;
+  lv.unit   = String(doc["wu"] | latest.unit);
+
+  // Jobs without serial info (quick print, old app) print without one.
+  JsonObject sn = doc["sn"];
+  if (!sn.isNull()) {
+    snLast++;
+    lv.serial   = formatSerial(sn, snLast);
+    lv.serialNo = snLast;
+    prefs.putULong("snN", snLast);
+  }
+
+  // Date/time: the app's clock, carried forward with millis(). Until the app
+  // has set it since power-on, fall back to the date/time of the stored job.
+  if (clockEpoch) {
+    time_t t = (time_t)(clockEpoch + (millis() - clockAtMs) / 1000UL);
+    struct tm tmv;
+    gmtime_r(&t, &tmv);   // epoch is already local time, so no TZ shift
+    char d[12], h[8];
+    strftime(d, sizeof(d), "%d-%m-%Y", &tmv);
+    strftime(h, sizeof(h), "%H:%M", &tmv);
+    lv.date = d; lv.time = h;
+  } else {
+    lv.date = String(doc["dt"]["d"] | "");
+    lv.time = String(doc["dt"]["t"] | "");
+  }
+
+  auto fmtW = [&](float v) {
+    char b[32];
+    snprintf(b, sizeof(b), "%.*f%s%s", (int)lv.dec, v < 0 ? 0.0f : v,
+             lv.unit.length() ? " " : "", lv.unit.c_str());
+    return String(b);
+  };
+  auto fmtMoney = [](float v) {
+    char b[24];
+    snprintf(b, sizeof(b), "%.2f", v);
+    return String(b);
+  };
 
   for (JsonObject e : doc["elements"].as<JsonArray>()) {
-    // QR with weight tokens: rebuild its data from the template the app kept.
-    // metal = live net − the stone deduction the operator entered in the app.
     const char* tpl = e["tpl"] | "";
-    if (*tpl) {
-      const char* unit = e["unit"] | latest.unit;
-      float metal = netG - (e["stone"] | 0.0f);
-      auto fmt = [&](float v) {
-        char b[32];
-        snprintf(b, sizeof(b), "%.*f%s%s", (int)dec, v < 0 ? 0.0f : v,
-                 *unit ? " " : "", unit);
-        return String(b);
+    const char* etype = e["type"] | "";
+    if (*tpl && strcmp(etype, "bar") == 0 && (e["dig"] | 0)) {
+      // "Numbers only" barcode (Code 128-C): each field becomes digits only,
+      // weights with exactly 3 decimals; separators typed in the template
+      // stay. Mirrors digitsOnlyFields() in the app.
+      auto digitsOf = [](const String& in) {
+        String d;
+        for (unsigned i = 0; i < in.length(); i++) if (isDigit(in[i])) d += in[i];
+        return d;
+      };
+      auto fixedD = [&](float v, int dec) {
+        char b[24];
+        snprintf(b, sizeof(b), "%.*f", dec, v < 0 ? 0.0f : v);
+        return digitsOf(String(b));
       };
       String q = tpl;
-      q.replace("{net}",   fmt(netG));
-      q.replace("{gross}", fmt(latest.value));
-      q.replace("{tare}",  fmt(tareGrams));
-      q.replace("{metal}", fmt(metal));
+      q.replace("{net}",    fixedD(lv.net, 3));
+      q.replace("{gross}",  fixedD(lv.gross, 3));
+      q.replace("{tare}",   fixedD(lv.tare, 3));
+      q.replace("{metal}",  fixedD(lv.metal, 3));
+      q.replace("{amount}", fixedD(lv.amount, 2));
+      q.replace("{making}", fixedD(lv.making, 2));
+      q.replace("{serial}", digitsOf(lv.serial));
+      q.replace("{date}",   digitsOf(lv.date));
+      q.replace("{time}",   digitsOf(lv.time));
       e["data"] = q;
+      continue;
+    }
+    if (*tpl) {
+      String q = tpl;
+      q.replace("{net}",    fmtW(lv.net));
+      q.replace("{gross}",  fmtW(lv.gross));
+      q.replace("{tare}",   fmtW(lv.tare));
+      q.replace("{metal}",  fmtW(lv.metal));
+      q.replace("{amount}", fmtMoney(lv.amount));
+      q.replace("{making}", fmtMoney(lv.making));
+      q.replace("{serial}", lv.serial);
+      q.replace("{date}",   lv.date);
+      q.replace("{time}",   lv.time);
+      String type = e["type"] | "";
+      if (type == "qr" || type == "bar" || (e["qr"] | 0)) e["data"] = q;
+      else                                                e["text"] = q;
+      // A QR the app sent as a bitmap: drop the stale picture so it is
+      // redrawn from the new data (executePrintJob).
+      if (e["qr"] | 0) e.remove("bmp");
       continue;
     }
 
@@ -522,10 +724,10 @@ void buttonReprint() {
     if (!*wv) continue;
 
     float g = 0;
-    if      (strcmp(wv, "net")   == 0) g = netG;
-    else if (strcmp(wv, "gross") == 0) g = latest.value;
-    else if (strcmp(wv, "tare")  == 0) g = tareGrams;
-    else if (strcmp(wv, "metal") == 0) g = netG;
+    if      (strcmp(wv, "net")   == 0) g = lv.net;
+    else if (strcmp(wv, "gross") == 0) g = lv.gross;
+    else if (strcmp(wv, "tare")  == 0) g = lv.tare;
+    else if (strcmp(wv, "metal") == 0) g = lv.metal;
     else continue;  // stone: keep stored value
 
     // Unit is a plain suffix chosen in the app; fall back to whatever the scale
@@ -534,13 +736,117 @@ void buttonReprint() {
     const char* suf  = e["suf"]  | "";
     const char* unit = e["unit"] | latest.unit;
     char buf[64];
-    snprintf(buf, sizeof(buf), "%s%.*f%s%s%s", pre, (int)dec,
+    snprintf(buf, sizeof(buf), "%s%.*f%s%s%s", pre, (int)lv.dec,
              g < 0 ? 0.0f : g, *unit ? " " : "", unit, suf);
     e["text"] = (const char*)buf;
   }
+}
 
+// Load the stored job. False when there is nothing (valid) to reprint.
+bool loadLastJob(DynamicJsonDocument& doc) {
+  String jobStr = lastPrintJson;
+  if (jobStr.isEmpty()) jobStr = prefs.getString("lastJob", "");
+  if (jobStr.isEmpty()) return false;
+  return deserializeJson(doc, jobStr) == DeserializationError::Ok;
+}
+
+// ============================================================================
+//  Print records — each button/auto label is sent to the app, or held (up to
+//  REC_PENDING_MAX, RAM only) until the app reconnects.
+// ============================================================================
+void sendPrintRecord(const String& rec) {
+  if (deviceConnected && pCharStatus) {
+    pCharStatus->setValue((uint8_t*)rec.c_str(), rec.length());
+    pCharStatus->notify();
+    return;
+  }
+  if (recPendN == REC_PENDING_MAX) {   // full: drop the oldest
+    for (uint8_t i = 1; i < REC_PENDING_MAX; i++) recPending[i - 1] = recPending[i];
+    recPendN--;
+  }
+  recPending[recPendN++] = rec;
+}
+
+void flushPrintRecords() {
+  for (uint8_t i = 0; i < recPendN && deviceConnected; i++) {
+    pCharStatus->setValue((uint8_t*)recPending[i].c_str(), recPending[i].length());
+    pCharStatus->notify();
+    recPending[i] = "";
+    delay(40);   // back-to-back notifies can be dropped by the phone's BLE stack
+  }
+  recPendN = 0;
+}
+
+// src: "btn" (physical button) or "auto". Returns false if there is no stored
+// template to print.
+bool livePrint(const char* src) {
+  DynamicJsonDocument doc(8192);
+  if (!loadLastJob(doc)) return false;
+  disarmAutoPrint();
+
+  digitalWrite(PRINT_LED_PIN, HIGH); delay(80); digitalWrite(PRINT_LED_PIN, LOW);
+  LiveValues lv;
+  fillLiveJob(doc, lv);
   executePrintJob(doc);
-  notifyStatus("ok", "btn-print");
+
+  // Kept well under the 244-byte notify limit (MTU 247).
+  StaticJsonDocument<320> r;
+  r["status"] = "rec";
+  r["src"] = src;
+  r["v"]  = lv.serial;
+  r["n"]  = lv.serialNo;
+  r["g"]  = lv.gross;
+  r["t"]  = lv.tare;
+  r["nt"] = lv.net;
+  r["st"] = lv.stone;
+  r["m"]  = lv.metal;
+  r["a"]  = lv.amount;
+  r["mk"] = lv.making;
+  r["d"]  = lv.dec;
+  r["u"]  = lv.unit;
+  r["dt"] = lv.date;
+  r["tm"] = lv.time;
+  r["ms"] = millis();   // lets the app date records delivered after a reconnect
+  String rec;
+  serializeJson(r, rec);
+  sendPrintRecord(rec);
+  return true;
+}
+
+void buttonReprint() {
+  if (!livePrint("btn")) {
+    digitalWrite(PRINT_LED_PIN, HIGH); delay(80); digitalWrite(PRINT_LED_PIN, LOW);
+    sendTestPrint();   // nothing printed from the app yet
+  }
+}
+
+// ============================================================================
+//  Auto print — prints the stored template by itself once a new item settles
+//  on the pan. Enabled from the app (Settings → Auto Print), kept in NVS.
+// ============================================================================
+// Any print (app, button, auto) counts as this item's label: auto print waits
+// for the pan to be cleared before the next one, so nothing prints twice.
+void disarmAutoPrint() {
+  autoArmed    = false;
+  autoStableMs = 0;
+}
+
+// Called every loop(). One label per item: after printing, the pan has to go
+// back below half the minimum weight before the next item can trigger.
+void serviceAutoPrint() {
+  if (!autoOn) return;
+  if (millis() - latest.tsMs > 2000) { autoStableMs = 0; return; }   // no scale data
+
+  float net = latest.value - tareGrams;
+  if (net < autoMin * 0.5f) { autoArmed = true; autoStableMs = 0; return; }
+  if (!autoArmed || net < autoMin || !latest.stable) { autoStableMs = 0; return; }
+
+  // Stable must hold a little longer, so a single "ST" frame from a still
+  // settling scale does not fire a label.
+  if (!autoStableMs) { autoStableMs = millis(); return; }
+  if (millis() - autoStableMs < 500) return;
+
+  livePrint("auto");
 }
 
 // ============================================================================
@@ -805,6 +1111,9 @@ void setup() {
   // Restore the calibrated label size so the first button print skips GAPDETECT
   lastLabelW = prefs.getUShort("calW", 0);
   lastLabelH = prefs.getUShort("calH", 0);
+  snLast  = prefs.getULong("snN", 0);
+  autoOn  = prefs.getBool("auto", false);
+  autoMin = prefs.getFloat("autoMin", 0.05f);
 
   // Boot test print — fires 3 s after power-on, no BLE needed.
   delay(3000);
@@ -832,6 +1141,7 @@ void loop() {
 
   serviceScale();
   pushWeightOverBLE();
+  serviceAutoPrint();
 
   // Process BLE command on the Arduino task — keeps BLE task free to ACK writes
   if (cmdReady) {

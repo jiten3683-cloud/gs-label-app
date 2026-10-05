@@ -83,9 +83,18 @@ class _ReportsPageState extends State<ReportsPage> {
     final r = _preset.range();
     _from = r.$1; _to = r.$2;
     _query();
+    context.read<DbService>().printsVersion.addListener(_onNewPrint);
   }
 
-  @override void dispose() { _searchCtrl.dispose(); super.dispose(); }
+  @override void dispose() {
+    context.read<DbService>().printsVersion.removeListener(_onNewPrint);
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  // New record (app, button or auto print) — refresh unless the user is
+  // mid-selection, which a reload would clear.
+  void _onNewPrint() { if (mounted && !_selectMode) _query(); }
 
   void _applyPreset(_Preset p) {
     setState(() { _preset = p; });
@@ -173,13 +182,14 @@ class _ReportsPageState extends State<ReportsPage> {
       context: context, isScrollControlled: true, useSafeArea: true,
       builder: (ctx) => _LabelPreviewSheet(
         row: row,
-        onReprint: _reprintJob,
+        onReprint: (job, {copies}) => _reprintJob(job, copies: copies, row: row),
         onMore: () { Navigator.pop(ctx); _showRowActions(row); },
       ),
     );
   }
 
-  Future<void> _reprintJob(Map<String, dynamic> job, {int? copies}) async {
+  Future<void> _reprintJob(Map<String, dynamic> job,
+      {int? copies, Map<String, dynamic>? row}) async {
     final ble = context.read<BleService>();
     if (!ble.isConnected) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -188,7 +198,21 @@ class _ReportsPageState extends State<ReportsPage> {
     }
     final Map<String, dynamic> toSend = copies != null
         ? {...job, 'copies': copies} : Map<String, dynamic>.from(job);
+    // The tare stored with an old label must not overwrite the ESP32's current
+    // tare, which button/auto prints use.
+    toSend.remove('tr');
     final sent = await ble.sendPrintJob(toSend);
+    // The ESP32 now repeats this label on button/auto print — records for
+    // those should carry this label's product details, not the last app print.
+    if (sent && row != null && mounted) {
+      await context.read<DbService>().setSetting('last_print_base', jsonEncode({
+        'product': row['product'], 'purity': row['purity'], 'hsn': row['hsn'],
+        'rate': row['rate'], 'making': row['making'], 'operator': row['operator_name'],
+        'template': (row['template'] as String? ?? '')
+            .replaceFirst(RegExp(r' \((Auto|Button)\)$'), ''),
+        'job': toSend,
+      }));
+    }
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(sent ? 'Reprinted successfully' : 'Failed to send to printer')));
   }
@@ -743,6 +767,8 @@ class _LabelPreviewSheetState extends State<_LabelPreviewSheet> {
           xScale: m['xs'] ?? 1, yScale: m['ys'] ?? 1, rotation: m['rot'] ?? 0,
           data: m['data'] ?? '', barcodeType: m['btype'] ?? '128',
           barcodeHeight: m['bh'] ?? 60, barcodeWidth: m['bw'] ?? 120,
+          barcodeDigitsOnly: m['dig'] == true,
+          barcodeBarDots: (m['bn'] as num?)?.toInt() ?? 0,
           qrEcc: m['ecc'] ?? 'M', qrSize: m['qs'] ?? 4,
           xEnd: m['xe'] ?? 100, yEnd: m['ye'] ?? 100, thickness: m['th'] ?? 2,
           logoName: m['logo'] ?? 'LOGO.BMP',
