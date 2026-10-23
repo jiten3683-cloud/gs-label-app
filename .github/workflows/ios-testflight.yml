@@ -18,12 +18,19 @@ on:
 
 jobs:
   ios:
-    runs-on: macos-15
+    # App Store Connect only accepts builds made with the iOS 26 SDK (Xcode 26+).
+    runs-on: macos-26
     defaults:
       run:
         working-directory: app
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
