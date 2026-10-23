@@ -747,6 +747,7 @@ class _LabelPreviewSheetState extends State<_LabelPreviewSheet> {
           'gap': tpl['gap_mm'] ?? 3,
           'darkness': int.tryParse(darkStr) ?? 8,
           'dir':      int.tryParse(dirStr)  ?? 0,
+          'dpi': int.tryParse(await db.getSetting('printer_dpi', def: '203')) ?? 203,
         },
         'copies': row['copies'] as int? ?? 1,
         'elements': elements,

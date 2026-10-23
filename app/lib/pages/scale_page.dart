@@ -565,6 +565,7 @@ class _ScalePageState extends State<ScalePage> {
         'w': tplRow['width_mm'], 'h': tplRow['height_mm'],
         'gap': tplRow['gap_mm'], 'darkness': int.tryParse(darkStr) ?? 8,
         'dir': int.tryParse(dirStr) ?? 1,
+        'dpi': int.tryParse(await db.getSetting('printer_dpi', def: '203')) ?? 203,
       },
       'copies': copies,
       // Extra-zero padding travels with the job so a physical-button reprint on
@@ -649,7 +650,8 @@ class _ScalePageState extends State<ScalePage> {
 
     final dirStr2 = await db.getSetting('print_direction', def: '1');
     final job = {'cmd': 'print',
-        'label': {'w': wMm, 'h': hMm, 'gap': gap, 'dir': int.tryParse(dirStr2) ?? 1},
+        'label': {'w': wMm, 'h': hMm, 'gap': gap, 'dir': int.tryParse(dirStr2) ?? 1,
+                  'dpi': int.tryParse(await db.getSetting('printer_dpi', def: '203')) ?? 203},
         'copies': 1, 'elements': elems};
     final sent = await ble.sendPrintJob(job);
     // The ESP32 now reprints this quick label on button/auto print; records

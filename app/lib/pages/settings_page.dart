@@ -31,6 +31,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final _bleNameCtrl      = TextEditingController(text: 'GS-LABEL-BRIDGE');
   String _defaultUnit     = 'g';
   int    _printDirection  = 1;   // 0 = Normal, 1 = Rotated 180°
+  int    _printerDpi      = 203; // 203 or 300 dots per inch
   bool   _extraZero       = false; // pad one extra trailing zero on weights
   bool   _autoPrint       = false; // ESP32 prints by itself on stable weight
   final _autoMinCtrl      = TextEditingController(text: '0.050');
@@ -72,6 +73,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _bleNameCtrl.text      = s['ble_device_name']      ?? 'GS-LABEL-BRIDGE';
     _defaultUnit           = s['default_unit']     ?? 'g';
     _printDirection        = int.tryParse(s['print_direction'] ?? '1') ?? 1;
+    _printerDpi            = int.tryParse(s['printer_dpi'] ?? '203') == 300 ? 300 : 203;
     _extraZero             = (s['weight_extra_zero'] ?? '0') == '1';
     _autoPrint             = (s['auto_print'] ?? '0') == '1';
     _autoMinCtrl.text      = s['auto_min_wt'] ?? '0.050';
@@ -133,6 +135,7 @@ class _SettingsPageState extends State<SettingsPage> {
       'ble_device_name':      _bleNameCtrl.text,
       'default_unit':    _defaultUnit,
       'print_direction': _printDirection.toString(),
+      'printer_dpi':     _printerDpi.toString(),
       'weight_extra_zero': _extraZero ? '1' : '0',
       'auto_print':  _autoPrint ? '1' : '0',
       'auto_min_wt': ((double.tryParse(_autoMinCtrl.text) ?? 0) > 0
@@ -250,6 +253,20 @@ class _SettingsPageState extends State<SettingsPage> {
                     DropdownMenuItem(value: 1, child: Text('Rotated 180° (DIRECTION 1)')),
                   ],
                   onChanged: (v) => setState(() => _printDirection = v ?? 0),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<int>(
+                  value: _printerDpi,
+                  decoration: const InputDecoration(
+                      labelText: 'Printer Resolution',
+                      prefixIcon: Icon(Icons.grain),
+                      border: OutlineInputBorder(),
+                      helperText: 'On the printer label: 203 dpi (8 dots/mm) or 300 dpi (12 dots/mm)'),
+                  items: const [
+                    DropdownMenuItem(value: 203, child: Text('203 dpi')),
+                    DropdownMenuItem(value: 300, child: Text('300 dpi')),
+                  ],
+                  onChanged: (v) => setState(() => _printerDpi = v ?? 203),
                 ),
               ]),
               const SizedBox(height: 16),

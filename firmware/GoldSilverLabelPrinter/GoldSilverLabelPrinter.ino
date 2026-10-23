@@ -286,6 +286,7 @@ void notifyStatus(const String& code, const String& msg) {
 
 // Font character heights in dots at 203 DPI — mirrors app kFontDotH
 static const uint8_t kFontH[9] = {0, 12, 20, 24, 32, 48, 19, 27, 21};
+static const uint8_t kFontW[9] = {0,  8, 12, 16, 24, 32, 14, 21, 14};
 
 // Reverse all 8 bits in a byte — used for 180° logo rotation
 static inline uint8_t reverseByte(uint8_t b) {
@@ -307,8 +308,14 @@ void executePrintJob(JsonDocument& doc) {
   uint8_t  dir      = label["dir"]      | 0;
   uint16_t copies   = doc["copies"]     | 1;
 
-  const int wDots = (int)w * 8;
-  const int hDots = (int)h * 8;
+  // Labels are designed in 203 dpi dots (8 per mm). A 300 dpi printer
+  // (11.81 dots/mm, e.g. Gainscha 300 dpi) gets every coordinate, size and
+  // bitmap scaled by k, so the tag prints at the same physical size.
+  const uint16_t dpi = label["dpi"] | 203;
+  const float k = dpi >= 280 ? 11.811f / 8.0f : 1.0f;
+  auto S = [&](int v) { return (int)lroundf(v * k); };
+  const int wDots = S((int)w * 8);
+  const int hDots = S((int)h * 8);
 
   // Always emit DIRECTION 0.  When dir=1 (reverse), every element's anchor is
   // mirrored to (wDots-x, hDots-y) and its rotation is flipped +180°.
@@ -321,9 +328,10 @@ void executePrintJob(JsonDocument& doc) {
     // App >= 2026-09-30 sends a QR holding Tab/Enter as a ready bitmap
     // ('logo' + 'qr': 1). Without its picture (live print, or stripped for
     // NVS) it is drawn here from 'data'.
-    if (type == "logo" && (e["qr"] | 0) && !e["bmp"].is<const char*>()) type = "qr";
-    int x = e["x"] | 0;
-    int y = e["y"] | 0;
+    // At 300 dpi it is always redrawn, with bigger modules, rather than scaled.
+    if (type == "logo" && (e["qr"] | 0) && (!e["bmp"].is<const char*>() || k != 1.0f)) type = "qr";
+    int x = S(e["x"] | 0);
+    int y = S(e["y"] | 0);
 
     // Skip elements whose anchor is outside the label area
     if (x < 0 || y < 0 || x >= wDots || y >= hDots) continue;
@@ -334,21 +342,47 @@ void executePrintJob(JsonDocument& doc) {
       String font = e["font"] | "3";
       int rot  = e["rot"] | 0;
       int ys   = e["ys"]  | 1;
+      int xs   = e["xs"]  | 1;
       int fIdx = font.toInt(); if (fIdx < 1 || fIdx > 8) fIdx = 3;
+      if (k != 1.0f) {
+        // Built-in fonts are fixed dot sizes, so 300 dpi gets the font and
+        // multipliers closest to the scaled size, never more than 8 % taller
+        // or 10 % wider: a template that fits at 203 dpi always fits here.
+        // Prefers a bigger font to a multiplied small one (blocky).
+        // 16x24 -> 24x32, 12x20 -> 16x24, 24x32 -> 32x48, 8x12 -> 8x12.
+        const float th = kFontH[fIdx] * ys * k, tw = kFontW[fIdx] * xs * k;
+        int bestF = 1, bestY = 1, bestX = 1; float bestErr = 1e9f;
+        for (int f = 1; f <= 8; f++) {
+          for (int my = 1; my <= 10; my++) {
+            if (kFontH[f] * my > th * 1.08f) continue;
+            int mx = constrain((int)lroundf(tw / kFontW[f]), 1, 10);
+            while (mx > 1 && kFontW[f] * mx > tw * 1.10f) mx--;
+            if (kFontW[f] * mx > tw * 1.10f) continue;
+            float err = fabsf(kFontH[f] * my - th) / th + fabsf(kFontW[f] * mx - tw) / tw
+                      + 0.08f * ((my - 1) + (mx - 1));
+            if (err < bestErr) { bestErr = err; bestF = f; bestY = my; bestX = mx; }
+          }
+        }
+        fIdx = bestF; ys = bestY; xs = bestX;
+        font = String(fIdx);
+      }
       int textH = (int)kFontH[fIdx] * ys;
       if (dir == 1) {
+        // 300 dpi: keep a bottom line inside the tag (the app clamps only in
+        // 203 dpi dots). 203 dpi stays exactly as before.
+        if (k != 1.0f && y + textH > hDots) y = max(0, hDots - textH);
         x = wDots - x; y = hDots - y; rot = (rot + 180) % 360;
       } else {
         // Clamp y so text height stays inside label (canvas clips visually; printer does not)
         if (y + textH > hDots) y = hDots - textH;
         if (y < 0) continue;
       }
-      tsplText(x, y, font, rot, e["xs"] | 1, ys, txt);
+      tsplText(x, y, font, rot, xs, ys, txt);
 
     } else if (type == "qr") {
       String d  = e["data"] | ""; d.replace("\"", "'");
       int rot   = e["rot"]  | 0;
-      int cells = e["size"] | 4;
+      int cells = max(1, S(e["size"] | 4));
       int qrDots = cells * 25;   // ≈ 25 modules per side for a typical small QR
       if (dir == 1) {
         x = wDots - x; y = hDots - y; rot = (rot + 180) % 360;
@@ -361,7 +395,7 @@ void executePrintJob(JsonDocument& doc) {
     } else if (type == "bar") {
       String d  = e["data"] | ""; d.replace("\"", "'");
       int rot   = e["rot"]    | 0;
-      int barH  = e["height"] | 60;
+      int barH  = S(e["height"] | 60);
       if (dir == 1) {
         x = wDots - x; y = hDots - y; rot = (rot + 180) % 360;
       } else {
@@ -369,12 +403,12 @@ void executePrintJob(JsonDocument& doc) {
         if (barH < 8) continue;
       }
       tsplBarcode(x, y, e["btype"] | "128", barH,
-                  e["hr"] | 1, rot, e["narrow"] | 2, e["wide"] | 2, d);
+                  e["hr"] | 1, rot, max(1, S(e["narrow"] | 2)), max(1, S(e["wide"] | 2)), d);
 
     } else if (type == "box") {
-      int xe = e["xe"] | (x + 50);
-      int ye = e["ye"] | (y + 50);
-      int t  = e["t"]  | 2;
+      int xe = e["xe"].is<int>() ? S(e["xe"].as<int>()) : x + S(50);
+      int ye = e["ye"].is<int>() ? S(e["ye"].as<int>()) : y + S(50);
+      int t  = max(1, S(e["t"] | 2));
       if (dir == 1) {
         int nx = wDots - xe, ny = hDots - ye;
         xe = wDots - x;  ye = hDots - y;
@@ -383,6 +417,44 @@ void executePrintJob(JsonDocument& doc) {
       x  = max(0, x);       y  = max(0, y);
       xe = min(xe, wDots);  ye = min(ye, hDots);
       tsplBox(x, y, xe, ye, t);
+
+    } else if (type == "logo" && k != 1.0f && strlen(e["bmp"] | "") > 0) {
+      // 300 dpi: rebuild the bitmap exactly as the 203 dpi path below would
+      // print it (that path's byte order and the TSC's MSB-first, 0 = black
+      // reading), then enlarge it by k, nearest dot, and send it raw.
+      int bw = e["bw"] | 0, bh = e["lh"] | 0;
+      const char* hex = e["bmp"] | "";
+      if (bw <= 0 || bh <= 0 || (int)strlen(hex) < bw * bh * 2) continue;
+      uint8_t* buf = (uint8_t*)malloc(bw * bh);
+      if (!buf) continue;
+      for (int i = 0; i < bw * bh; i++) {
+        char nb[3] = { hex[2 * i], hex[2 * i + 1], '\0' };
+        buf[i] = (uint8_t)strtol(nb, nullptr, 16);
+      }
+      // Byte the 203 dpi path sends at (row, col) of the printed image.
+      auto sent = [&](int r, int c) {
+        return dir == 1 ? reverseByte(buf[(bh - 1 - r) * bw + (bw - 1 - c)])
+                        : reverseByte(buf[r * bw + c]);
+      };
+      const int W2 = (int)lroundf(bw * 8 * k), H2 = (int)lroundf(bh * k);
+      const int bw2 = (W2 + 7) / 8;
+      if (dir == 1) { x = max(0, wDots - x - W2); y = max(0, hDots - y - H2); }
+      Serial.printf("BITMAP %d,%d,%d,%d,0,", x, y, bw2, H2);
+      for (int oy = 0; oy < H2; oy++) {
+        int r = min(bh - 1, (int)(oy / k));
+        for (int ob = 0; ob < bw2; ob++) {
+          uint8_t v = 0xFF;                       // all white
+          for (int bit = 0; bit < 8; bit++) {
+            int ox = ob * 8 + bit;
+            if (ox >= W2) break;
+            int px = min(bw * 8 - 1, (int)(ox / k));
+            if (!(sent(r, px >> 3) & (0x80 >> (px & 7)))) v &= ~(0x80 >> bit);
+          }
+          Serial.write(v);
+        }
+      }
+      Serial.print("\r\n");
+      free(buf);
 
     } else if (type == "logo") {
       int bw = e["bw"] | 0;
