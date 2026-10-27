@@ -32,6 +32,9 @@ class BleService extends ChangeNotifier {
   String lastStatus  = '';
 
   List<ScanResult> nearbyDevices = [];
+  // Bridges the OS already holds a connection to (not advertising, so not in
+  // nearbyDevices). Filled by startGeneralScan.
+  List<BluetoothDevice> linkedDevices = [];
 
   // Raw scale readings — the numbers exactly as the scale sent them. The ESP32
   // does not unit-convert, so these are in `scaleUnit`, whatever that happens to
@@ -88,6 +91,7 @@ class BleService extends ChangeNotifier {
     if (!(await FlutterBluePlus.isSupported)) return;
     nearbyDevices = [];
     isScanning = true;
+    linkedDevices = await systemBridges();
     notifyListeners();
 
     final sub = FlutterBluePlus.scanResults.listen((results) {
@@ -118,31 +122,71 @@ class BleService extends ChangeNotifier {
 
     isScanning = true;
     notifyListeners();
-    final completer = Completer<BluetoothDevice?>();
-    late StreamSubscription sub;
-    sub = FlutterBluePlus.scanResults.listen((results) {
-      for (final r in results) {
-        if (r.device.platformName == deviceName) {
-          if (!completer.isCompleted) completer.complete(r.device);
+
+    // The bridge stops advertising once anything connects to it (its BT LED
+    // lights). If that "anything" is this phone/iPad at OS level, a scan can
+    // never find it — so take an already-connected bridge first.
+    BluetoothDevice? found = (await systemBridges()).firstOrNull;
+
+    if (found == null) {
+      final completer = Completer<BluetoothDevice?>();
+      late StreamSubscription sub;
+      sub = FlutterBluePlus.scanResults.listen((results) {
+        for (final r in results) {
+          if (isBridge(r) && !completer.isCompleted) completer.complete(r.device);
         }
-      }
-    });
-    await FlutterBluePlus.startScan(timeout: timeout, withNames: [deviceName]);
-    final found =
-        await completer.future.timeout(timeout, onTimeout: () => null);
-    await sub.cancel();
-    await FlutterBluePlus.stopScan();
+      });
+      // Filter on the service UUID: iOS reports a cached GAP name in
+      // platformName, so matching names alone misses the bridge there.
+      await FlutterBluePlus.startScan(timeout: timeout, withServices: [_svc]);
+      found = await completer.future.timeout(timeout, onTimeout: () => null);
+      await sub.cancel();
+      await FlutterBluePlus.stopScan();
+    }
     isScanning = false;
 
     if (found == null) {
-      lastStatus = 'Device not found';
+      lastStatus = 'Bridge not found – if its BT LED is on, another phone may be '
+          'connected to it';
       notifyListeners();
       return;
     }
-    await _connectTo(found);
+    try {
+      await _connectTo(found);
+    } catch (e) {
+      lastStatus = 'Connect failed: $e';
+      notifyListeners();
+    }
   }
 
-  Future<void> connectToDevice(BluetoothDevice d) => _connectTo(d);
+  /// Bridges already connected to this phone/iPad by the OS. They do not
+  /// advertise, so they never appear in scan results.
+  Future<List<BluetoothDevice>> systemBridges() async {
+    try {
+      final sys = await FlutterBluePlus.systemDevices([_svc]);
+      final ids = sys.map((d) => d.remoteId).toSet();
+      return [
+        ...sys,
+        ...FlutterBluePlus.connectedDevices.where((d) => !ids.contains(d.remoteId)),
+      ];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  bool isBridge(ScanResult r) =>
+      r.advertisementData.serviceUuids.contains(_svc) ||
+      r.advertisementData.advName == deviceName ||
+      r.device.platformName == deviceName;
+
+  Future<void> connectToDevice(BluetoothDevice d) async {
+    try {
+      await _connectTo(d);
+    } catch (e) {
+      lastStatus = 'Connect failed: $e';
+      notifyListeners();
+    }
+  }
 
   Future<void> _connectTo(BluetoothDevice d) async {
     _reconnectTimer?.cancel();

@@ -193,6 +193,24 @@ class _ConnectPageState extends State<ConnectPage> {
           ],
         ],
 
+        if (!ble.isConnected && ble.linkedDevices.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          const Text('Already linked to this device:',
+              style: TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          ...ble.linkedDevices.map((d) => Card(
+            color: Theme.of(context).colorScheme.primaryContainer,
+            child: ListTile(
+              leading: Icon(Icons.bluetooth_connected,
+                  color: Theme.of(context).colorScheme.primary),
+              title: Text(d.platformName.isNotEmpty ? d.platformName : ble.deviceName),
+              subtitle: Text(d.remoteId.str),
+              trailing: FilledButton(
+                  onPressed: () => _connectDevice(d), child: const Text('Connect')),
+            ),
+          )),
+        ],
+
         if (ble.nearbyDevices.isNotEmpty) ...[
           const SizedBox(height: 16),
           const Text('Devices found:',
@@ -200,7 +218,7 @@ class _ConnectPageState extends State<ConnectPage> {
           const SizedBox(height: 6),
           ...ble.nearbyDevices.map((r) => _DeviceTile(
             result:   r,
-            isBridge: r.device.platformName == ble.deviceName,
+            isBridge: ble.isBridge(r),
             onConnect: () => _connectDevice(r.device),
           )),
         ],
