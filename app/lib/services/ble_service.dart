@@ -151,12 +151,7 @@ class BleService extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    try {
-      await _connectTo(found);
-    } catch (e) {
-      lastStatus = 'Connect failed: $e';
-      notifyListeners();
-    }
+    await connectToDevice(found);
   }
 
   /// Bridges already connected to this phone/iPad by the OS. They do not
@@ -183,6 +178,8 @@ class BleService extends ChangeNotifier {
     try {
       await _connectTo(d);
     } catch (e) {
+      // Drop a half-made link, or the bridge stays held and stops advertising.
+      try { await d.disconnect(); } catch (_) {}
       lastStatus = 'Connect failed: $e';
       notifyListeners();
     }
@@ -192,7 +189,10 @@ class BleService extends ChangeNotifier {
     _reconnectTimer?.cancel();
     _device = d;
     await d.connect(autoConnect: false, timeout: const Duration(seconds: 8));
-    await d.requestMtu(247);
+    // requestMtu throws "android-only" on iOS, which negotiates MTU itself.
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      try { await d.requestMtu(247); } catch (_) {}
+    }
 
     _connSub?.cancel();
     _connSub = d.connectionState.listen((state) {
@@ -292,8 +292,9 @@ class BleService extends ChangeNotifier {
     if (_command == null) throw Exception('Not connected');
     final bytes = Uint8List.fromList(utf8.encode(jsonEncode(payload)));
     // flutter_blue_plus throws PlatformException if a single write > 244 bytes.
-    // Manually chunk into 200-byte pieces; ESP32 bleBuffer reassembles them.
-    const chunkSize = 200;
+    // Manually chunk into ≤200-byte pieces (smaller if the negotiated MTU is,
+    // e.g. on iOS); ESP32 bleBuffer reassembles them.
+    final chunkSize = ((_device?.mtuNow ?? 203) - 3).clamp(20, 200);
     for (var i = 0; i < bytes.length; i += chunkSize) {
       final chunk = bytes.sublist(i, (i + chunkSize).clamp(0, bytes.length));
       await _command!.write(chunk, withoutResponse: false);

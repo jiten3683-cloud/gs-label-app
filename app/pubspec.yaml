@@ -1,7 +1,7 @@
 name: gs_label_app
 description: "JBC-GS-PRINTER — Gold & Silver label printing app for ESP32 + TSC TTP-244 Pro"
 publish_to: 'none'
-version: 1.0.10+12
+version: 1.0.11+13
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -60,7 +60,10 @@ dependencies:
   package_info_plus: ^9.0.1
 
 dev_dependencies:
+  flutter_test:
+    sdk: flutter
   flutter_lints: ^4.0.0
+  sqflite_common_ffi: ^2.4.0+3
 
 flutter:
   uses-material-design: true
