@@ -159,7 +159,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
-      body: _loading
+      body: Center(child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 900),
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(padding: const EdgeInsets.all(16), children: [
 
@@ -463,6 +465,7 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               const SizedBox(height: 24),
             ]),
+      )),
     );
   }
 

@@ -103,15 +103,19 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         ],
       ),
       // IndexedStack keeps all tabs alive — state is preserved on tab switch.
-      body: IndexedStack(
-        index: _idx,
-        children: const [
-          ScalePage(),        // 0 — Scale / Print
-          LabelStudioPage(),  // 1 — WYSIWYG Label Studio (designer + templates merged)
-          ReportsPage(),      // 2 — Print history
-          ConnectPage(),      // 3 — BLE device
-        ],
-      ),
+      // Capped width so pages stay readable on an iPad instead of stretching.
+      body: Center(child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 900),
+        child: IndexedStack(
+          index: _idx,
+          children: const [
+            ScalePage(),        // 0 — Scale / Print
+            LabelStudioPage(),  // 1 — WYSIWYG Label Studio (designer + templates merged)
+            ReportsPage(),      // 2 — Print history
+            ConnectPage(),      // 3 — BLE device
+          ],
+        ),
+      )),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _idx,
         onDestinationSelected: (i) => setState(() => _idx = i),
